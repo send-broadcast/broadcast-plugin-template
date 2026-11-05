@@ -36,7 +36,9 @@ export function checkBundle(code) {
       problems.push(`${at}: longer than ${MAX_LINE_LENGTH} characters. Minified code is not allowed.`);
     }
   });
-  if (!/^\s*export\s+default\s+definePlugin\s*\(/m.test(code)) {
+  // export default definePlugin(...), or the export { x as default } that esbuild --format=esm writes
+  const esbuildDefault = /^\s*export\s*\{[^}]*\bas\s+default\b[^}]*\}\s*;?\s*$/m;
+  if (!/^\s*export\s+default\s+definePlugin\s*\(/m.test(code) && !esbuildDefault.test(code)) {
     problems.push("no `export default definePlugin({...})` at the start of a line.");
   }
   return problems;
