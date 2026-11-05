@@ -1,0 +1,7 @@
+dist/
+*.broadcast-plugin
+node_modules/
+.env
+.env.*
+*.pem
+*.key

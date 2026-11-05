@@ -1,0 +1,36 @@
+# Each push: the plugin store's structure check, the build and the tests, with the kit in kit/.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The Deno version of the Broadcast plugin runtime
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.8
+
+      - name: Structure check
+        run: node kit/cli/broadcast-plugin.mjs check
+
+      # The esbuild version the plugin store builds with
+      - name: Install esbuild
+        run: npm install --global "esbuild@$(node -p "require('./kit/spec/plugin-repo.json').build.esbuild")"
+
+      - name: Build
+        run: node kit/cli/broadcast-plugin.mjs build
+
+      - name: Tests
+        run: deno task check && deno task test

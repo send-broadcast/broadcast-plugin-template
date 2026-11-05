@@ -1,0 +1,9 @@
+{
+  "id": "local.my-plugin",
+  "name": "My plugin",
+  "version": "0.1.0",
+  "requires": { "broadcast": ">=3.0.0 <4.0.0", "pluginApi": "1" },
+  "permissions": {},
+  "hooks": { "events": ["subscriber.created"] },
+  "settings": {}
+}

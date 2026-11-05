@@ -1,0 +1,283 @@
+{
+  "specVersion": 1,
+  "about": "The structure of a Broadcast plugin repo. `broadcast-plugin check` and the plugin store read these same rules, so a repo that passes the check here passes the store's structure check. Paths are relative to the repo root and use /. A folder path ends with /. An error stops a submission; a warning does not. The matching rules are in `matching`; plugin-repo-vectors.json has shared cases that both checks must pass.",
+  "matching": {
+    "result": "Each problem is {id, level, path?}. Rule problems have no path; forbidden, symlink and dist problems name the path (a folder path ends with /). Compare results as a set.",
+    "file": "kind file: that path is a regular file that is not forbidden.",
+    "anyFile": "kind anyFile: at least one of paths is a regular file.",
+    "folder": "kind folder: that folder holds at least one regular file at any depth that is not forbidden (a test/.env alone does not count).",
+    "absent": "kind absent: a problem when that path exists (file or folder); the problem has the path.",
+    "forbidden": "pattern matches the NAME of a file or folder at any depth, case-insensitive. * matches zero or more characters and never /. A name in forbiddenExceptions is never forbidden. A forbidden folder is reported once with its path and is not looked into.",
+    "skip": "skip names are skipped at the repo root only, with everything in them.",
+    "symlinks": "a symbolic link anywhere is an error (id symlink, with its path) and is not followed.",
+    "limits": "limits count regular files that are not skipped, not forbidden and not inside a forbidden folder. maxBytes is the sum of their sizes. Over a limit: a problem with the limit's id.",
+    "manifest": "manifest.json present but not valid JSON or not an object: error id manifest-json, and manifest.required is not checked. A required dotted key is missing when absent, null, or a string that is empty after trim; a key under a part that is not an object (for example requires: false or 0) is absent. Error id manifest.<key>. manifest.json absent: only the rule manifest.",
+    "hardLinks": "a hard link in a file tree is a regular file. (The store refuses hard-link and other special entries in a fetched archive; that is outside this spec.)"
+  },
+  "repo": {
+    "rules": [
+      {
+        "id": "manifest",
+        "level": "error",
+        "kind": "file",
+        "path": "manifest.json",
+        "message": "manifest.json is missing. It names the plugin, its version, the Broadcast versions it supports and its permissions."
+      },
+      {
+        "id": "entry",
+        "level": "error",
+        "kind": "anyFile",
+        "paths": [
+          "src/main.ts",
+          "src/main.js"
+        ],
+        "message": "The plugin code is missing: add src/main.ts or src/main.js."
+      },
+      {
+        "id": "readme",
+        "level": "error",
+        "kind": "file",
+        "path": "README.md",
+        "message": "README.md is missing. The store shows it on the plugin page."
+      },
+      {
+        "id": "license",
+        "level": "error",
+        "kind": "file",
+        "path": "LICENSE",
+        "message": "LICENSE is missing."
+      },
+      {
+        "id": "agents",
+        "level": "error",
+        "kind": "file",
+        "path": "AGENTS.md",
+        "message": "AGENTS.md is missing. It tells coding agents how to build this plugin; copy it from the template."
+      },
+      {
+        "id": "tests",
+        "level": "error",
+        "kind": "folder",
+        "path": "test/",
+        "message": "test/ is missing or empty. Add at least one test (see the template)."
+      },
+      {
+        "id": "claude",
+        "level": "warning",
+        "kind": "file",
+        "path": "CLAUDE.md",
+        "message": "CLAUDE.md is missing. The template's CLAUDE.md points Claude Code to AGENTS.md."
+      },
+      {
+        "id": "kit",
+        "level": "warning",
+        "kind": "folder",
+        "path": "kit/",
+        "message": "kit/ is missing. A pinned copy of the plugin kit lets CI build and test with no Broadcast server."
+      },
+      {
+        "id": "ci",
+        "level": "warning",
+        "kind": "folder",
+        "path": ".github/workflows/",
+        "message": ".github/workflows/ is missing. The template's workflow runs build, test and check on each push."
+      },
+      {
+        "id": "gitignore",
+        "level": "warning",
+        "kind": "file",
+        "path": ".gitignore",
+        "message": ".gitignore is missing. It keeps dist/, packages and secrets out of the repo."
+      },
+      {
+        "id": "dist",
+        "level": "warning",
+        "kind": "absent",
+        "path": "dist/",
+        "message": "dist/ is built by `broadcast-plugin build` and by the plugin store. Remove it from the repo and add it to .gitignore."
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "node-modules",
+        "level": "error",
+        "pattern": "node_modules",
+        "message": "node_modules/ must not be in the repo."
+      },
+      {
+        "id": "env",
+        "level": "error",
+        "pattern": ".env",
+        "message": "A .env file can hold secrets. Remove it from the repo."
+      },
+      {
+        "id": "env",
+        "level": "error",
+        "pattern": ".env.*",
+        "message": "A .env file can hold secrets. Remove it from the repo."
+      },
+      {
+        "id": "key-file",
+        "level": "error",
+        "pattern": "*.pem",
+        "message": "A key or certificate file must not be in the repo."
+      },
+      {
+        "id": "key-file",
+        "level": "error",
+        "pattern": "*.key",
+        "message": "A key file must not be in the repo."
+      },
+      {
+        "id": "key-file",
+        "level": "error",
+        "pattern": "*.p12",
+        "message": "A key file must not be in the repo."
+      },
+      {
+        "id": "ssh-key",
+        "level": "error",
+        "pattern": "id_rsa",
+        "message": "A private SSH key must not be in the repo."
+      },
+      {
+        "id": "ssh-key",
+        "level": "error",
+        "pattern": "id_ed25519",
+        "message": "A private SSH key must not be in the repo."
+      },
+      {
+        "id": "package-file",
+        "level": "error",
+        "pattern": "*.broadcast-plugin",
+        "message": "Built packages do not go in the repo. Attach them to a release instead."
+      }
+    ],
+    "forbiddenExceptions": [
+      ".env.example",
+      ".env.sample"
+    ],
+    "skip": [
+      ".git"
+    ],
+    "symlinks": {
+      "id": "symlink",
+      "level": "error",
+      "message": "Symbolic links are not allowed in a plugin repo."
+    },
+    "limits": [
+      {
+        "id": "limits.maxFiles",
+        "level": "error",
+        "value": 2000,
+        "message": "The repo has more than 2000 files."
+      },
+      {
+        "id": "limits.maxBytes",
+        "level": "error",
+        "value": 52428800,
+        "message": "The repo files are larger than 50 MB together."
+      }
+    ]
+  },
+  "manifest": {
+    "required": [
+      "id",
+      "name",
+      "version",
+      "requires.broadcast",
+      "requires.pluginApi"
+    ],
+    "invalid": {
+      "id": "manifest-json",
+      "level": "error",
+      "message": "manifest.json is not a valid JSON object."
+    },
+    "missing": {
+      "idPrefix": "manifest.",
+      "level": "error",
+      "message": "manifest.json has no %s."
+    }
+  },
+  "imports": {
+    "about": "Before a build, every module in src/ may import only other files in src/. Checked: src/ files with a sourceExtension. Patterns: import \"x\", import ... from \"x\", export ... from \"x\", import(\"x\"), require(\"x\"); any `from` followed by a string counts. Strings, template literals, comments and regular expression literals are told apart by a tokenizer; a name after . (obj.import) is not a pattern. import()/require() must take one plain string (a template without ${} counts as plain). A specifier must start with ./ or ../, may not hold a backslash, and resolved (query and hash removed) must stay in src/. Each problem is {id, level, path, specifier?, call?}: call is import() or require() for import-computed. The same problem in one file is reported once.",
+    "sourceExtensions": [
+      ".js",
+      ".mjs",
+      ".cjs",
+      ".jsx",
+      ".ts",
+      ".mts",
+      ".cts",
+      ".tsx"
+    ],
+    "refusedExtensions": [
+      ".css"
+    ],
+    "problems": {
+      "import-not-utf8": {
+        "level": "error",
+        "message": "%{path} is not valid UTF-8 text."
+      },
+      "import-backslash": {
+        "level": "error",
+        "message": "%{path} imports \"%{specifier}\": a path with a backslash is not allowed. Use /."
+      },
+      "import-not-relative": {
+        "level": "error",
+        "message": "%{path} imports \"%{specifier}\": only files in src/ can be imported, with ./ or ../. The store builds with no npm, jsr or node packages and no network; copy the code into src/."
+      },
+      "import-outside-src": {
+        "level": "error",
+        "message": "%{path} imports \"%{specifier}\": the path leaves src/. Only files in src/ can be imported."
+      },
+      "import-css": {
+        "level": "error",
+        "message": "%{path} imports \"%{specifier}\": CSS is not bundled into dist/main.js. Put styles in ui/."
+      },
+      "import-computed": {
+        "level": "error",
+        "message": "%{path}: %{call} must take one plain string such as './file.js'. The store does not bundle computed paths."
+      }
+    }
+  },
+  "build": {
+    "about": "How dist/main.js is built, by `broadcast-plugin build` and by the plugin store from a repo: esbuild <entry> <flags> --outfile=dist/main.js, with only src/ present. The store pins this esbuild version; the kit warns when the local one differs. Imports must be relative (./ or ../) and stay inside src/.",
+    "esbuild": "0.28.2",
+    "entry": [
+      "src/main.ts",
+      "src/main.js"
+    ],
+    "output": "dist/main.js",
+    "flags": [
+      "--bundle",
+      "--format=esm",
+      "--platform=neutral",
+      "--log-level=warning"
+    ]
+  },
+  "package": {
+    "allowedFiles": [
+      "manifest.json",
+      "dist/main.js",
+      "README.md",
+      "LICENSE",
+      "SIGNATURE",
+      "deno.json",
+      "deno.lock",
+      "package.json"
+    ],
+    "allowedFolders": [
+      "ui/",
+      "assets/",
+      "src/",
+      "vendor/"
+    ],
+    "limits": {
+      "maxPackageBytes": 5242880,
+      "maxUnpackedBytes": 20971520,
+      "maxFileBytes": 5242880,
+      "maxFiles": 500
+    }
+  }
+}

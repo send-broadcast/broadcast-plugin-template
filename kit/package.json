@@ -1,0 +1,11 @@
+{
+  "name": "broadcast-plugin",
+  "version": "0.1.0",
+  "description": "Write, build, pack and test Broadcast plugins.",
+  "type": "module",
+  "private": true,
+  "bin": { "broadcast-plugin": "cli/broadcast-plugin.mjs" },
+  "types": "types/index.d.ts",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/*.test.mjs" }
+}

@@ -1,0 +1,598 @@
+{
+  "about": "Shared cases for plugin-repo.json. Each case: start from baseRepo when base is true; files maps a path to its text (null removes it); folders makes empty folders; symlinks maps a path to its target; limits replaces a limit value by id. expected is the set of problems {id, level, path?}. The kit (plugin_kit/test/spec.test.mjs) and the plugin store both run every case.",
+  "baseRepo": {
+    "manifest.json": "{\"id\": \"local.demo\", \"name\": \"Demo\", \"version\": \"1.0.0\", \"requires\": {\"broadcast\": \">=3.0.0 <4.0.0\", \"pluginApi\": \"1\"}, \"permissions\": {}}",
+    "src/main.ts": "export default {};\n",
+    "README.md": "# Demo\n",
+    "LICENSE": "MIT\n",
+    "AGENTS.md": "# Agents\n",
+    "CLAUDE.md": "See AGENTS.md\n",
+    "test/plugin.test.ts": "// test\n",
+    "kit/README.md": "kit\n",
+    ".github/workflows/check.yml": "on: push\n",
+    ".gitignore": "dist/\n"
+  },
+  "cases": [
+    {
+      "name": "the template layout has no problems",
+      "base": true,
+      "expected": []
+    },
+    {
+      "name": "src/main.js instead of src/main.ts",
+      "base": true,
+      "files": {
+        "src/main.ts": null,
+        "src/main.js": "export default {};\n"
+      },
+      "expected": []
+    },
+    {
+      "name": "an empty repo misses every rule",
+      "base": false,
+      "expected": [
+        {
+          "id": "manifest",
+          "level": "error"
+        },
+        {
+          "id": "entry",
+          "level": "error"
+        },
+        {
+          "id": "readme",
+          "level": "error"
+        },
+        {
+          "id": "license",
+          "level": "error"
+        },
+        {
+          "id": "agents",
+          "level": "error"
+        },
+        {
+          "id": "tests",
+          "level": "error"
+        },
+        {
+          "id": "claude",
+          "level": "warning"
+        },
+        {
+          "id": "kit",
+          "level": "warning"
+        },
+        {
+          "id": "ci",
+          "level": "warning"
+        },
+        {
+          "id": "gitignore",
+          "level": "warning"
+        }
+      ]
+    },
+    {
+      "name": "an empty test folder does not count",
+      "base": true,
+      "files": {
+        "test/plugin.test.ts": null
+      },
+      "folders": [
+        "test/sub/"
+      ],
+      "expected": [
+        {
+          "id": "tests",
+          "level": "error"
+        }
+      ]
+    },
+    {
+      "name": "a file in a nested test folder counts",
+      "base": true,
+      "files": {
+        "test/plugin.test.ts": null,
+        "test/unit/a.test.ts": "// a\n"
+      },
+      "expected": []
+    },
+    {
+      "name": "node_modules at any depth, reported once per folder",
+      "base": true,
+      "files": {
+        "node_modules/a/index.js": "x",
+        "node_modules/b/index.js": "x",
+        "src/node_modules/c.js": "x"
+      },
+      "expected": [
+        {
+          "id": "node-modules",
+          "level": "error",
+          "path": "node_modules/"
+        },
+        {
+          "id": "node-modules",
+          "level": "error",
+          "path": "src/node_modules/"
+        }
+      ]
+    },
+    {
+      "name": "forbidden names match without case",
+      "base": true,
+      "files": {
+        "config/PROD.PEM": "x",
+        "Id_RSA": "x"
+      },
+      "expected": [
+        {
+          "id": "key-file",
+          "level": "error",
+          "path": "config/PROD.PEM"
+        },
+        {
+          "id": "ssh-key",
+          "level": "error",
+          "path": "Id_RSA"
+        }
+      ]
+    },
+    {
+      "name": "* matches zero characters",
+      "base": true,
+      "files": {
+        ".pem": "x"
+      },
+      "expected": [
+        {
+          "id": "key-file",
+          "level": "error",
+          "path": ".pem"
+        }
+      ]
+    },
+    {
+      "name": ".env files are forbidden, .env.example and .env.sample are not",
+      "base": true,
+      "files": {
+        ".env": "x",
+        "src/.env.local": "x",
+        ".env.example": "x",
+        ".env.sample": "x"
+      },
+      "expected": [
+        {
+          "id": "env",
+          "level": "error",
+          "path": ".env"
+        },
+        {
+          "id": "env",
+          "level": "error",
+          "path": "src/.env.local"
+        }
+      ]
+    },
+    {
+      "name": "a built package is forbidden",
+      "base": true,
+      "files": {
+        "local.demo-1.0.0.broadcast-plugin": "x"
+      },
+      "expected": [
+        {
+          "id": "package-file",
+          "level": "error",
+          "path": "local.demo-1.0.0.broadcast-plugin"
+        }
+      ]
+    },
+    {
+      "name": ".git is skipped at the root only",
+      "base": true,
+      "files": {
+        ".git/id_rsa": "x",
+        "vendor/.git/id_rsa": "x"
+      },
+      "expected": [
+        {
+          "id": "ssh-key",
+          "level": "error",
+          "path": "vendor/.git/id_rsa"
+        }
+      ]
+    },
+    {
+      "name": "a dist folder is a warning",
+      "base": true,
+      "files": {
+        "dist/main.js": "x"
+      },
+      "expected": [
+        {
+          "id": "dist",
+          "level": "warning",
+          "path": "dist/"
+        }
+      ]
+    },
+    {
+      "name": "a symbolic link is an error and is not followed",
+      "base": true,
+      "symlinks": {
+        "src/link.ts": "main.ts"
+      },
+      "expected": [
+        {
+          "id": "symlink",
+          "level": "error",
+          "path": "src/link.ts"
+        }
+      ]
+    },
+    {
+      "name": "a manifest that is not JSON",
+      "base": true,
+      "files": {
+        "manifest.json": "{ not json"
+      },
+      "expected": [
+        {
+          "id": "manifest-json",
+          "level": "error"
+        }
+      ]
+    },
+    {
+      "name": "a manifest that is not an object",
+      "base": true,
+      "files": {
+        "manifest.json": "[1]"
+      },
+      "expected": [
+        {
+          "id": "manifest-json",
+          "level": "error"
+        }
+      ]
+    },
+    {
+      "name": "blank, null and absent manifest keys are missing",
+      "base": true,
+      "files": {
+        "manifest.json": "{\"id\": \"local.demo\", \"name\": \"  \", \"version\": null, \"requires\": {\"broadcast\": \">=3.0.0 <4.0.0\"}}"
+      },
+      "expected": [
+        {
+          "id": "manifest.name",
+          "level": "error"
+        },
+        {
+          "id": "manifest.version",
+          "level": "error"
+        },
+        {
+          "id": "manifest.requires.pluginApi",
+          "level": "error"
+        }
+      ]
+    },
+    {
+      "name": "over the file limit",
+      "base": true,
+      "limits": {
+        "limits.maxFiles": 9
+      },
+      "expected": [
+        {
+          "id": "limits.maxFiles",
+          "level": "error"
+        }
+      ]
+    },
+    {
+      "name": "skipped and forbidden folders do not count toward the limits",
+      "base": true,
+      "limits": {
+        "limits.maxFiles": 10
+      },
+      "files": {
+        ".git/HEAD": "x",
+        "node_modules/a.js": "x"
+      },
+      "expected": [
+        {
+          "id": "node-modules",
+          "level": "error",
+          "path": "node_modules/"
+        }
+      ]
+    },
+    {
+      "name": "over the size limit",
+      "base": true,
+      "limits": {
+        "limits.maxBytes": 100
+      },
+      "files": {
+        "README.md": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "expected": [
+        {
+          "id": "limits.maxBytes",
+          "level": "error"
+        }
+      ]
+    },
+    {
+      "name": "forbidden files do not count toward the limits",
+      "base": true,
+      "limits": {
+        "limits.maxFiles": 10
+      },
+      "files": {
+        ".env": "x"
+      },
+      "expected": [
+        {
+          "id": "env",
+          "level": "error",
+          "path": ".env"
+        }
+      ]
+    },
+    {
+      "name": "a forbidden file alone does not satisfy a folder rule",
+      "base": true,
+      "files": {
+        "test/plugin.test.ts": null,
+        "test/.env": "x"
+      },
+      "expected": [
+        {
+          "id": "tests",
+          "level": "error"
+        },
+        {
+          "id": "env",
+          "level": "error",
+          "path": "test/.env"
+        }
+      ]
+    },
+    {
+      "name": "requires false: its keys are missing",
+      "base": true,
+      "files": {
+        "manifest.json": "{\"id\": \"local.demo\", \"name\": \"Demo\", \"version\": \"1.0.0\", \"requires\": false, \"permissions\": {}}"
+      },
+      "expected": [
+        {
+          "id": "manifest.requires.broadcast",
+          "level": "error"
+        },
+        {
+          "id": "manifest.requires.pluginApi",
+          "level": "error"
+        }
+      ]
+    },
+    {
+      "name": "requires 0: its keys are missing",
+      "base": true,
+      "files": {
+        "manifest.json": "{\"id\": \"local.demo\", \"name\": \"Demo\", \"version\": \"1.0.0\", \"requires\": 0, \"permissions\": {}}"
+      },
+      "expected": [
+        {
+          "id": "manifest.requires.broadcast",
+          "level": "error"
+        },
+        {
+          "id": "manifest.requires.pluginApi",
+          "level": "error"
+        }
+      ]
+    }
+  ],
+  "importsAbout": "importCases: files maps a path to its text (bytesBase64 for raw bytes); expected is the set of {id, path, specifier?, call?}: specifier for the specifier problems, call (import() or require()) for import-computed, neither for import-not-utf8.",
+  "importCases": [
+    {
+      "name": "relative imports inside src/ pass",
+      "files": {
+        "src/main.ts": "import { a } from './lib/a.ts';\nimport b from \"./lib/b\";\nexport { c } from './c.js';\nimport './side.js';\n",
+        "src/lib/a.ts": "import { u } from '../util.js';\nexport const a = u;\n"
+      },
+      "expected": []
+    },
+    {
+      "name": "namespace, export *, import type, and ../ that stays in src/ pass; an absolute path is refused",
+      "files": {
+        "src/a/b.ts": "import * as ns from './c.ts';\nexport * from '../lib/x.ts';\nimport type { T } from '../types.ts';\nimport abs from '/etc/passwd';\n"
+      },
+      "expected": [
+        {
+          "id": "import-not-relative",
+          "path": "src/a/b.ts",
+          "specifier": "/etc/passwd"
+        }
+      ]
+    },
+    {
+      "name": "bare, npm:, jsr:, node:, https: and data: specifiers are refused",
+      "files": {
+        "src/main.ts": "import _ from 'lodash';\nimport a from 'npm:left-pad';\nimport b from 'jsr:@std/assert';\nimport fs from 'node:fs';\nimport c from 'https://esm.sh/x';\nimport d from 'data:text/javascript,1';\n"
+      },
+      "expected": [
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "lodash"
+        },
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "npm:left-pad"
+        },
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "jsr:@std/assert"
+        },
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "node:fs"
+        },
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "https://esm.sh/x"
+        },
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "data:text/javascript,1"
+        }
+      ]
+    },
+    {
+      "name": "export ... from a package is refused",
+      "files": {
+        "src/main.ts": "export { a } from \"pkg\";\n"
+      },
+      "expected": [
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "pkg"
+        }
+      ]
+    },
+    {
+      "name": "a path that leaves src/ is refused",
+      "files": {
+        "src/main.ts": "import '../secret.js';\nimport '../../../etc/passwd';\n",
+        "src/lib/x.ts": "import '../../manifest.json';\n"
+      },
+      "expected": [
+        {
+          "id": "import-outside-src",
+          "path": "src/main.ts",
+          "specifier": "../secret.js"
+        },
+        {
+          "id": "import-outside-src",
+          "path": "src/main.ts",
+          "specifier": "../../../etc/passwd"
+        },
+        {
+          "id": "import-outside-src",
+          "path": "src/lib/x.ts",
+          "specifier": "../../manifest.json"
+        }
+      ]
+    },
+    {
+      "name": "CSS is refused",
+      "files": {
+        "src/main.ts": "import './style.CSS';\n"
+      },
+      "expected": [
+        {
+          "id": "import-css",
+          "path": "src/main.ts",
+          "specifier": "./style.CSS"
+        }
+      ]
+    },
+    {
+      "name": "a backslash is refused",
+      "files": {
+        "src/main.ts": "import '.\\\\lib\\\\a.js';\n"
+      },
+      "expected": [
+        {
+          "id": "import-backslash",
+          "path": "src/main.ts",
+          "specifier": ".\\\\lib\\\\a.js"
+        }
+      ]
+    },
+    {
+      "name": "computed import() and require() are refused; plain strings and plain templates pass",
+      "files": {
+        "src/main.ts": "const n = './a.js';\nawait import(n);\nrequire(`./${n}`);\nimport('./a' + '.js');\nawait import('./a.js');\nrequire(\"./b.js\");\nawait import(`./c.js`);\n"
+      },
+      "expected": [
+        {
+          "id": "import-computed",
+          "path": "src/main.ts",
+          "call": "import()"
+        },
+        {
+          "id": "import-computed",
+          "path": "src/main.ts",
+          "call": "require()"
+        }
+      ]
+    },
+    {
+      "name": "comments, strings, templates and regular expressions are not imports",
+      "files": {
+        "src/main.ts": "// import 'lodash'\n/* require('fs') */\nconst s = 'import \"lodash\"';\nconst t = `from \"pkg\"`;\nconst r = /import \"x\"/g;\nconst q = 4 / 2; const w = q / 1;\nexport default s + t + r + w;\n"
+      },
+      "expected": []
+    },
+    {
+      "name": "a name after a dot is not a pattern",
+      "files": {
+        "src/main.ts": "const a = obj.require('fs');\nconst b = Array.from('abc');\nconst c = x.import('y');\n"
+      },
+      "expected": []
+    },
+    {
+      "name": "files outside src/ and other file types are not checked",
+      "files": {
+        "test/a.test.ts": "import _ from 'lodash';\n",
+        "src/data.json": "{\"import\": \"lodash\"}\n",
+        "src/main.ts": "export default 1;\n"
+      },
+      "expected": []
+    },
+    {
+      "name": "a query or hash is removed before the path is resolved",
+      "files": {
+        "src/main.ts": "import a from './a.js?raw';\nimport b from './b.js#x';\n"
+      },
+      "expected": []
+    },
+    {
+      "name": "the same problem in one file is reported once",
+      "files": {
+        "src/main.ts": "import a from 'pkg';\nimport { b } from 'pkg';\n"
+      },
+      "expected": [
+        {
+          "id": "import-not-relative",
+          "path": "src/main.ts",
+          "specifier": "pkg"
+        }
+      ]
+    },
+    {
+      "name": "a file that is not UTF-8",
+      "bytesBase64": {
+        "src/main.ts": "aW1wb3J0IGEgZnJvbSAnLi9hLmpzJzsK//4K"
+      },
+      "expected": [
+        {
+          "id": "import-not-utf8",
+          "path": "src/main.ts"
+        }
+      ]
+    }
+  ]
+}
