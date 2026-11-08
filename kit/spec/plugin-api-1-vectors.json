@@ -1,0 +1,366 @@
+{
+  "$comment": [
+    "Test cases for the plugin Host API (plugin API 1). Broadcast runs them against its real Host API",
+    "(test/services/plugins/host_api_vectors_test.rb) and the kit runs them against the sandbox host",
+    "(test/sandbox_vectors_test.ts). A change in either must keep both green.",
+    "Each case starts from the world below in a new channel. permissions are catalog names",
+    "(spec/plugin-api-1.json); the basic ones need not be listed. In args and expectations, \"$ada\" is",
+    "the id of the person with ref ada as a number, \"#ada\" the same id as a string, and \"$missing\" an id",
+    "no subscriber has. expect.result is compared exactly; expect.includes compares only the keys it",
+    "names (objects) and each item in order (lists of the same length); expect.error is an error code.",
+    "A case may set limits (subscriberReadsPerHour) to a small number; both runners apply it.",
+    "sanitize: HTML a plugin returns (beforeSend HTML, html merge tags) in, Broadcast's cleaned HTML out (Plugins::SendHooks#sanitize).",
+    "publicActionTokens: a public action link token (Plugins::PublicActionLink) for a key and [plugin_key, channel_id, subscriber_id, action].",
+    "manifestPermissions: manifest.json in, Broadcast's catalog permissions out (Plugins::ManifestValidator).",
+    "Each manifest is merged into a valid minimal manifest (id, name, version, requires).",
+    "cron: a hooks.schedules cron and a time in, Fugit::Cron's previous_time and next_time out (UTC on a server); null means refused."
+  ],
+  "pluginApi": "1",
+  "world": {
+    "subscribers": [
+      {"ref": "ada", "email": "ada@example.com", "first_name": "Ada", "custom_data": {"plan": "free"}, "tags": ["customer"]},
+      {"ref": "bea", "email": "bea@example.com", "first_name": "Bea", "is_active": false},
+      {"ref": "cy", "email": "cy@example.com", "erased": true}
+    ],
+    "topics": [
+      {"name": "Newsletter", "storage": "tag", "tag_name": "newsletter"},
+      {"name": "Weekly", "storage": "custom_data", "custom_data_key": "weekly"}
+    ]
+  },
+  "cases": [
+    {
+      "name": "store get, set, delete",
+      "steps": [
+        {"op": "store.get", "args": {"key": "a"}, "expect": {"result": null}},
+        {"op": "store.set", "args": {"key": "a", "value": {"n": 1, "list": [1, "x"]}}, "expect": {"result": true}},
+        {"op": "store.get", "args": {"key": "a"}, "expect": {"result": {"n": 1, "list": [1, "x"]}}},
+        {"op": "store.delete", "args": {"key": "a"}, "expect": {"result": true}},
+        {"op": "store.delete", "args": {"key": "a"}, "expect": {"result": false}},
+        {"op": "store.get", "args": {"key": "a"}, "expect": {"result": null}}
+      ]
+    },
+    {
+      "name": "store increment counts whole numbers only",
+      "steps": [
+        {"op": "store.increment", "args": {"key": "votes"}, "expect": {"result": 1}},
+        {"op": "store.increment", "args": {"key": "votes", "by": 2}, "expect": {"result": 3}},
+        {"op": "store.increment", "args": {"key": "votes", "by": -3}, "expect": {"result": 0}},
+        {"op": "store.increment", "args": {"key": "votes", "by": 1.5}, "expect": {"error": "invalid"}},
+        {"op": "store.increment", "args": {"key": "votes", "by": "2"}, "expect": {"error": "invalid"}},
+        {"op": "store.set", "args": {"key": "word", "value": "a"}, "expect": {"result": true}},
+        {"op": "store.increment", "args": {"key": "word"}, "expect": {"error": "invalid"}},
+        {"op": "store.get", "args": {"key": "votes"}, "expect": {"result": 0}}
+      ]
+    },
+    {
+      "name": "store list is ordered by key, after the cursor, at most 100",
+      "steps": [
+        {"op": "store.set", "args": {"key": "poll:b", "value": 2}, "expect": {"result": true}},
+        {"op": "store.set", "args": {"key": "poll:a", "value": 1}, "expect": {"result": true}},
+        {"op": "store.set", "args": {"key": "poll:c", "value": 3}, "expect": {"result": true}},
+        {"op": "store.set", "args": {"key": "other", "value": 0}, "expect": {"result": true}},
+        {"op": "store.list", "args": {"prefix": "poll:"}, "expect": {"result": [{"key": "poll:a", "value": 1}, {"key": "poll:b", "value": 2}, {"key": "poll:c", "value": 3}]}},
+        {"op": "store.list", "args": {"prefix": "poll:", "cursor": "poll:a", "limit": 1}, "expect": {"result": [{"key": "poll:b", "value": 2}]}},
+        {"op": "store.list", "args": {"prefix": "poll:", "limit": 0}, "expect": {"result": [{"key": "poll:a", "value": 1}]}},
+        {"op": "store.list", "args": {"prefix": "poll:", "limit": 500}, "expect": {"includes": [{"key": "poll:a"}, {"key": "poll:b"}, {"key": "poll:c"}]}},
+        {"op": "store.list", "args": {}, "expect": {"includes": [{"key": "other"}, {"key": "poll:a"}, {"key": "poll:b"}, {"key": "poll:c"}]}}
+      ]
+    },
+    {
+      "name": "store rows of one person are apart from the channel rows",
+      "steps": [
+        {"op": "store.set", "args": {"key": "vote", "value": "a1", "subscriber_id": "$ada"}, "expect": {"result": true}},
+        {"op": "store.get", "args": {"key": "vote"}, "expect": {"result": null}},
+        {"op": "store.get", "args": {"key": "vote", "subscriber_id": "$ada"}, "expect": {"result": "a1"}},
+        {"op": "store.get", "args": {"key": "vote", "subscriber_id": "$bea"}, "expect": {"result": null}},
+        {"op": "store.increment", "args": {"key": "n", "subscriber_id": "$ada"}, "expect": {"result": 1}},
+        {"op": "store.list", "args": {"subscriber_id": "$ada"}, "expect": {"result": [{"key": "n", "value": 1}, {"key": "vote", "value": "a1"}]}},
+        {"op": "store.list", "args": {}, "expect": {"result": []}}
+      ]
+    },
+    {
+      "name": "store rows of a person outside the channel or erased are refused",
+      "steps": [
+        {"op": "store.get", "args": {"key": "vote", "subscriber_id": "$cy"}, "expect": {"error": "not_found"}},
+        {"op": "store.set", "args": {"key": "vote", "value": 1, "subscriber_id": "$missing"}, "expect": {"error": "not_found"}}
+      ]
+    },
+    {
+      "name": "settings.secret reads declared settings only",
+      "manifest": {"settings": {"api_key": {"type": "string", "secret": true}, "webhook_url": {"type": "url", "secret": true}}},
+      "settings": {"api_key": "sk_test_1"},
+      "steps": [
+        {"op": "settings.secret", "args": {"name": "api_key"}, "expect": {"result": "sk_test_1"}},
+        {"op": "settings.secret", "args": {"name": "webhook_url"}, "expect": {"result": null}},
+        {"op": "settings.secret", "args": {"name": "password"}, "expect": {"error": "not_found"}}
+      ]
+    },
+    {
+      "name": "ops outside the permissions are refused",
+      "permissions": ["tags:read"],
+      "steps": [
+        {"op": "subscribers.get", "args": {"id": "$ada"}, "expect": {"error": "forbidden"}},
+        {"op": "subscribers.update", "args": {"id": "$ada", "first_name": "A"}, "expect": {"error": "forbidden"}},
+        {"op": "tags.add", "args": {"subscriber_id": "$ada", "tags": ["vip"]}, "expect": {"error": "forbidden"}},
+        {"op": "tags.list", "args": {}, "expect": {"result": ["customer"]}},
+        {"op": "broadcasts.list", "args": {}, "expect": {"error": "forbidden"}},
+        {"op": "files.read", "args": {}, "expect": {"error": "forbidden"}},
+        {"op": "store.set", "args": {"key": "k", "value": 1}, "expect": {"result": true}}
+      ]
+    },
+    {
+      "name": "subscribers get and find",
+      "permissions": ["subscribers:read"],
+      "steps": [
+        {"op": "subscribers.get", "args": {"id": "$ada"}, "expect": {"includes": {"id": "$ada", "email": "ada@example.com", "first_name": "Ada", "last_name": null, "is_active": true, "tags": ["customer"], "custom_data": {"plan": "free"}}}},
+        {"op": "subscribers.get", "args": {"id": "$bea"}, "expect": {"includes": {"email": "bea@example.com", "is_active": false}}},
+        {"op": "subscribers.get", "args": {"id": "$cy"}, "expect": {"error": "not_found"}},
+        {"op": "subscribers.get", "args": {"id": "$missing"}, "expect": {"error": "not_found"}},
+        {"op": "subscribers.find", "args": {"email": " ADA@Example.com "}, "expect": {"includes": {"id": "$ada"}}},
+        {"op": "subscribers.find", "args": {"email": "nobody@example.com"}, "expect": {"result": null}},
+        {"op": "subscribers.find", "args": {"email": "cy@example.com"}, "expect": {"result": null}}
+      ]
+    },
+    {
+      "name": "subscribers list stops at 100 without export",
+      "permissions": ["subscribers:read"],
+      "steps": [
+        {"op": "subscribers.list", "args": {}, "expect": {"includes": {"items": [{"id": "$ada"}, {"id": "$bea"}], "next_cursor": null}}},
+        {"op": "subscribers.list", "args": {"limit": 101}, "expect": {"error": "forbidden"}},
+        {"op": "subscribers.list", "args": {"cursor": "#ada"}, "expect": {"error": "forbidden"}},
+        {"op": "subscribers.list", "args": {"updated_since": "junk"}, "expect": {"error": "invalid"}}
+      ]
+    },
+    {
+      "name": "subscribers list pages with export",
+      "permissions": ["subscribers:read", "subscribers:export"],
+      "steps": [
+        {"op": "subscribers.list", "args": {"limit": 1}, "expect": {"includes": {"items": [{"id": "$ada"}], "next_cursor": "#ada"}}},
+        {"op": "subscribers.list", "args": {"limit": 1, "cursor": "#ada"}, "expect": {"includes": {"items": [{"id": "$bea"}], "next_cursor": null}}}
+      ]
+    },
+    {
+      "name": "subscribers update changes names and custom fields, never email or a topic",
+      "permissions": ["subscribers:read", "subscribers:write"],
+      "steps": [
+        {"op": "subscribers.update", "args": {"id": "$ada", "first_name": "Ada L.", "custom_data": {"seats": 3}}, "expect": {"includes": {"first_name": "Ada L.", "custom_data": {"plan": "free", "seats": 3}}}},
+        {"op": "subscribers.update", "args": {"id": "$ada", "email": "x@example.com", "is_active": false}, "expect": {"includes": {"email": "ada@example.com", "is_active": true}}},
+        {"op": "subscribers.update", "args": {"id": "$ada", "custom_data": {"weekly": true}}, "expect": {"error": "forbidden"}},
+        {"op": "subscribers.update", "args": {"id": "$cy", "first_name": "C"}, "expect": {"error": "not_found"}},
+        {"op": "subscribers.get", "args": {"id": "$ada"}, "expect": {"includes": {"first_name": "Ada L.", "custom_data": {"plan": "free", "seats": 3}}}}
+      ]
+    },
+    {
+      "name": "subscribers bulkUpsert: per item results, idempotency key, no creation without permission",
+      "permissions": ["subscribers:read", "subscribers:write"],
+      "steps": [
+        {"op": "subscribers.bulkUpsert", "args": {"items": [{"email": "ada@example.com"}]}, "expect": {"error": "invalid"}},
+        {"op": "subscribers.bulkUpsert", "args": {"items": "no", "idempotency_key": "k0"}, "expect": {"error": "invalid"}},
+        {"op": "subscribers.bulkUpsert", "args": {"idempotency_key": "k1", "items": [{"email": "ADA@example.com", "last_name": "Lovelace"}, {"email": "new@example.com"}, {"email": "bea@example.com", "tags": ["Newsletter"]}, {"first_name": "no email"}]}, "expect": {"includes": [{"email": "ada@example.com", "ok": true, "id": "$ada", "created": false}, {"email": "new@example.com", "ok": false, "error": {"code": "forbidden"}}, {"email": "bea@example.com", "ok": false, "error": {"code": "forbidden"}}, {"ok": false, "error": {"code": "invalid"}}]}},
+        {"op": "subscribers.bulkUpsert", "args": {"idempotency_key": "k1", "items": [{"email": "other@example.com"}]}, "expect": {"includes": [{"email": "ada@example.com", "ok": true}, {"ok": false}, {"ok": false}, {"ok": false}]}},
+        {"op": "subscribers.get", "args": {"id": "$ada"}, "expect": {"includes": {"last_name": "Lovelace"}}}
+      ]
+    },
+    {
+      "name": "subscribers bulkUpsert creates people with subscribers:create",
+      "permissions": ["subscribers:read", "subscribers:write", "subscribers:create"],
+      "steps": [
+        {"op": "subscribers.bulkUpsert", "args": {"idempotency_key": "k2", "items": [{"email": "New@Example.com", "first_name": "New", "tags": ["lead"]}]}, "expect": {"includes": [{"email": "new@example.com", "ok": true, "created": true}]}},
+        {"op": "subscribers.find", "args": {"email": "new@example.com"}, "expect": {"includes": {"first_name": "New", "tags": ["lead"], "is_active": true}}}
+      ]
+    },
+    {
+      "name": "tags add, remove and list",
+      "permissions": ["tags:read", "tags:write"],
+      "steps": [
+        {"op": "tags.add", "args": {"subscriber_id": "$ada", "tags": ["vip"]}, "expect": {"result": ["customer", "vip"]}},
+        {"op": "tags.add", "args": {"subscriber_id": "$ada", "tags": ["vip"]}, "expect": {"result": ["customer", "vip"]}},
+        {"op": "tags.remove", "args": {"subscriber_id": "$ada", "tags": ["customer"]}, "expect": {"result": ["vip"]}},
+        {"op": "tags.add", "args": {"subscriber_id": "$bea", "tags": ["beta"]}, "expect": {"result": ["beta"]}},
+        {"op": "tags.list", "args": {}, "expect": {"result": ["beta", "vip"]}}
+      ]
+    },
+    {
+      "name": "tags: a topic tag, an empty list and an erased person are refused",
+      "permissions": ["tags:read", "tags:write"],
+      "steps": [
+        {"op": "tags.add", "args": {"subscriber_id": "$ada", "tags": [" NewsLetter "]}, "expect": {"error": "forbidden"}},
+        {"op": "tags.remove", "args": {"subscriber_id": "$ada", "tags": ["newsletter"]}, "expect": {"error": "forbidden"}},
+        {"op": "tags.add", "args": {"subscriber_id": "$ada", "tags": []}, "expect": {"error": "invalid"}},
+        {"op": "tags.add", "args": {"subscriber_id": "$cy", "tags": ["vip"]}, "expect": {"error": "not_found"}}
+      ]
+    },
+    {
+      "name": "tags bulk calls answer per person",
+      "permissions": ["tags:read", "tags:write"],
+      "steps": [
+        {"op": "tags.bulkAdd", "args": {"subscriber_ids": ["$ada", "$missing"], "tags": ["vip"]}, "expect": {"includes": [{"id": "$ada", "ok": true}, {"id": "$missing", "ok": false, "error": {"code": "not_found"}}]}},
+        {"op": "tags.bulkAdd", "args": {"subscriber_ids": ["$ada"], "tags": ["newsletter"]}, "expect": {"includes": [{"id": "$ada", "ok": false, "error": {"code": "forbidden"}}]}},
+        {"op": "tags.bulkRemove", "args": {"subscriber_ids": ["$ada"], "tags": ["vip"]}, "expect": {"includes": [{"id": "$ada", "ok": true}]}},
+        {"op": "tags.bulkAdd", "args": {"subscriber_ids": "$ada", "tags": ["vip"]}, "expect": {"error": "invalid"}}
+      ]
+    },
+    {
+      "name": "events record only declared events with declared types",
+      "manifest": {"events": {"order.paid": {"value": "decimal", "properties": {"plan": "string", "seats": "integer"}}}},
+      "steps": [
+        {"op": "events.record", "args": {"name": "order.paid", "subscriber_id": "$ada", "value": "19.5", "properties": {"plan": "pro", "seats": 3}}, "expect": {"result": {"ok": true}}},
+        {"op": "events.record", "args": {"name": "order.paid", "email": "someone@example.com"}, "expect": {"result": {"ok": true}}},
+        {"op": "events.record", "args": {"name": "order.refunded", "subscriber_id": "$ada"}, "expect": {"includes": {"ok": false, "error": {"code": "invalid"}}}},
+        {"op": "events.record", "args": {"name": "order.paid", "subscriber_id": "$ada", "properties": {"seats": "many"}}, "expect": {"includes": {"ok": false, "error": {"code": "invalid"}}}},
+        {"op": "events.record", "args": {"name": "order.paid", "subscriber_id": "$ada", "properties": {"color": "red"}}, "expect": {"includes": {"ok": false, "error": {"code": "invalid"}}}},
+        {"op": "events.record", "args": {"name": "order.paid"}, "expect": {"includes": {"ok": false, "error": {"code": "invalid"}}}},
+        {"op": "events.record", "args": {"name": "order.paid", "subscriber_id": "$ada", "occurred_at": "2999-01-01T00:00:00Z"}, "expect": {"includes": {"ok": false, "error": {"code": "invalid"}}}}
+      ]
+    },
+    {
+      "name": "events bulkRecord needs an idempotency key and repeats its first answer",
+      "manifest": {"events": {"poll.answered": {"properties": {"poll": "string", "answer": "string"}}}},
+      "steps": [
+        {"op": "events.bulkRecord", "args": {"items": [{"name": "poll.answered", "subscriber_id": "$ada"}]}, "expect": {"error": "invalid"}},
+        {"op": "events.bulkRecord", "args": {"idempotency_key": "b1", "items": [{"name": "poll.answered", "subscriber_id": "$ada", "properties": {"poll": "p1", "answer": "a1"}}, {"name": "nope", "subscriber_id": "$ada"}]}, "expect": {"includes": [{"ok": true}, {"ok": false, "error": {"code": "invalid"}}]}},
+        {"op": "events.bulkRecord", "args": {"idempotency_key": "b1", "items": [{"name": "nope"}]}, "expect": {"includes": [{"ok": true}, {"ok": false}]}}
+      ]
+    },
+    {
+      "name": "without export, get, find and update read a limited number of different people an hour",
+      "permissions": ["subscribers:read", "subscribers:write"],
+      "limits": {"subscriberReadsPerHour": 1},
+      "steps": [
+        {"op": "subscribers.get", "args": {"id": "$ada"}, "expect": {"includes": {"id": "$ada"}}},
+        {"op": "subscribers.get", "args": {"id": "$ada"}, "expect": {"includes": {"id": "$ada"}}},
+        {"op": "subscribers.find", "args": {"email": "bea@example.com"}, "expect": {"error": "forbidden"}},
+        {"op": "subscribers.get", "args": {"id": "$bea"}, "expect": {"error": "forbidden"}},
+        {"op": "subscribers.update", "args": {"id": "$bea", "first_name": "B"}, "expect": {"error": "forbidden"}},
+        {"op": "subscribers.update", "args": {"id": "$ada", "first_name": "A"}, "expect": {"includes": {"first_name": "A"}}},
+        {"op": "subscribers.list", "args": {}, "expect": {"includes": {"items": [{"id": "$ada"}, {"id": "$bea"}]}}}
+      ]
+    },
+    {
+      "name": "with export there is no hourly read limit",
+      "permissions": ["subscribers:read", "subscribers:export"],
+      "limits": {"subscriberReadsPerHour": 1},
+      "steps": [
+        {"op": "subscribers.get", "args": {"id": "$ada"}, "expect": {"includes": {"id": "$ada"}}},
+        {"op": "subscribers.get", "args": {"id": "$bea"}, "expect": {"includes": {"id": "$bea"}}}
+      ]
+    },
+    {
+      "name": "store keys that start with __ are Broadcast's own: the plugin cannot write them",
+      "steps": [
+        {"op": "store.set", "args": {"key": "__idem:events.bulkRecord:b1", "value": [{"ok": true}]}, "expect": {"error": "invalid"}},
+        {"op": "store.increment", "args": {"key": "__n"}, "expect": {"error": "invalid"}},
+        {"op": "store.delete", "args": {"key": "__n"}, "expect": {"error": "invalid"}},
+        {"op": "store.set", "args": {"key": "__v", "value": 1, "subscriber_id": "$ada"}, "expect": {"error": "invalid"}},
+        {"op": "store.set", "args": {"key": "__v", "value": 1, "subscriber_id": "$missing"}, "expect": {"error": "not_found"}},
+        {"op": "store.set", "args": {"key": "_one", "value": 1}, "expect": {"result": true}},
+        {"op": "store.get", "args": {"key": "__anything"}, "expect": {"result": null}}
+      ]
+    },
+    {
+      "name": "Broadcast's own store rows are hidden from the plugin",
+      "permissions": ["subscribers:read", "subscribers:write"],
+      "manifest": {"events": {"poll.answered": {"properties": {"poll": "string"}}}},
+      "steps": [
+        {"op": "events.bulkRecord", "args": {"idempotency_key": "b1", "items": [{"name": "poll.answered", "subscriber_id": "$ada"}]}, "expect": {"result": [{"ok": true}]}},
+        {"op": "subscribers.bulkUpsert", "args": {"idempotency_key": "u1", "items": [{"email": "ada@example.com"}]}, "expect": {"includes": [{"ok": true}]}},
+        {"op": "store.get", "args": {"key": "__idem:events.bulkRecord:b1"}, "expect": {"result": null}},
+        {"op": "store.list", "args": {}, "expect": {"result": []}},
+        {"op": "store.list", "args": {"prefix": "__"}, "expect": {"result": []}},
+        {"op": "events.bulkRecord", "args": {"idempotency_key": "b1", "items": [{"name": "nope"}]}, "expect": {"result": [{"ok": true}]}}
+      ]
+    },
+    {
+      "name": "events.record with an idempotency key answers a retry the same way",
+      "manifest": {"events": {"poll.answered": {"properties": {"poll": "string"}}}},
+      "steps": [
+        {"op": "events.record", "args": {"name": "poll.answered", "subscriber_id": "$ada", "idempotency_key": "r1"}, "expect": {"result": {"ok": true}}},
+        {"op": "events.record", "args": {"name": "nope", "idempotency_key": "r1"}, "expect": {"result": {"ok": true}}},
+        {"op": "events.record", "args": {"name": "nope"}, "expect": {"includes": {"ok": false, "error": {"code": "invalid"}}}},
+        {"op": "store.list", "args": {}, "expect": {"result": []}}
+      ]
+    }
+  ],
+  "manifestPermissions": [
+    {"name": "no permissions and no sensitive hooks", "manifest": {}, "permissions": []},
+    {"name": "write also grants read", "manifest": {"permissions": {"tags": "write", "subscribers": "write"}}, "permissions": ["subscribers:read", "subscribers:write", "tags:read", "tags:write"]},
+    {"name": "a list of modes", "manifest": {"permissions": {"subscribers": ["read", "export"]}}, "permissions": ["subscribers:export", "subscribers:read"]},
+    {"name": "network hosts, a wildcard and a setting", "manifest": {"permissions": {"network": ["api.example.com", "*.example.org", {"fromSetting": "webhook_url"}]}, "settings": {"webhook_url": {"type": "url", "secret": true}}}, "permissions": ["network", "network:fromSetting", "network:wildcard"]},
+    {"name": "html output", "manifest": {"permissions": {"output": "html"}}, "permissions": ["output:html"]},
+    {"name": "an elevated permission", "manifest": {"permissions": {"elevated": ["network.private"]}}, "permissions": ["network.private"]},
+    {"name": "sensitive hooks", "manifest": {"hooks": {"publicActions": [{"name": "vote"}], "beforeSend": true}}, "permissions": ["hooks:beforeSend", "hooks:publicActions"]},
+    {"name": "an event sent to webhooks", "manifest": {"events": {"poll.answered": {"webhook": true, "properties": {"poll": "string"}}}}, "permissions": ["events:webhook"]},
+    {"name": "Polls 1.3.0", "manifest": {"permissions": {"tags": "write"}, "hooks": {"publicActions": [{"name": "vote"}], "apiEndpoints": [{"name": "create", "method": "POST", "permission": "broadcasts_write"}]}, "events": {"poll.answered": {"webhook": true, "properties": {"poll": "string", "answer": "string"}}}}, "permissions": ["events:webhook", "hooks:apiEndpoints", "hooks:publicActions", "tags:read", "tags:write"]}
+  ],
+  "publicActionTokens": [
+    {"keyHex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "fields": ["broadcast.polls", 1, 3, "vote"], "token": "WyJicm9hZGNhc3QucG9sbHMiLDEsMywidm90ZSJd--445d02fa7538b3635aab75a263888f8cf84dd16e"},
+    {"keyHex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "fields": ["acme.shop-x", 42, 1000001, "rate"], "token": "WyJhY21lLnNob3AteCIsNDIsMTAwMDAwMSwicmF0ZSJd--255d944a7844960fb7cfb33577bfe081d0f2ba92"}
+  ],
+  "sanitize": [
+    {"name": "plain allowed markup", "html": "<p>Hello <b>world</b> &amp; <i>you</i></p>", "out": "<p>Hello <b>world</b> &amp; <i>you</i></p>"},
+    {"name": "an onclick goes, class stays", "html": "<p class=\"x\" onclick=\"steal()\">Hi</p>", "out": "<p class=\"x\">Hi</p>"},
+    {"name": "link protocols", "html": "<a href=\"javascript:alert(1)\">x</a><a href=\"data:text/html,hi\">d</a><a href=\"vbscript:x\">v</a><a href=\"https://example.com/a?b=1&c=2\" target=\"_blank\">ok</a><a href=\"/rel\">r</a><a href=\"mailto:a@b.c\">m</a><a href=\"#top\" title=\"T\">t</a>", "out": "<a>x</a><a>d</a><a>v</a><a href=\"https://example.com/a?b=1&amp;c=2\" target=\"_blank\">ok</a><a href=\"/rel\">r</a><a href=\"mailto:a@b.c\">m</a><a href=\"#top\" title=\"T\">t</a>"},
+    {"name": "hidden javascript links", "html": "<a href=\" JaVaScRiPt:alert(1)\">sp</a><a href=\"&#106;avascript:alert(1)\">ent</a><a href=\"java&#x09;script:alert(1)\">tab</a>", "out": "<a>sp</a><a>ent</a><a>tab</a>"},
+    {"name": "svg and math go with their content", "html": "<svg><circle onload=\"x()\"/><text>t</text></svg><math><mi>x</mi></math><p>after</p>", "out": "<p>after</p>"},
+    {"name": "a form goes, its text stays", "html": "<form action=\"https://evil.test\"><input name=\"pw\"><button>Go</button></form>", "out": "Go"},
+    {"name": "style: allowed properties only, no expression(), no url()", "html": "<div style=\"color: red; width: expression(alert(1)); background: url(https://x.test/a.png); font-weight: bold\">s</div>", "out": "<div style=\"color:red;font-weight:bold;\">s</div>"},
+    {"name": "style: shorthand keywords, important, quoted font", "html": "<p style=\"margin: 0 0 8px 0; padding: 4px; color: #ff0000 !important; font-family: 'Helvetica Neue', Arial\">m</p>", "out": "<p style=\"margin:0 0 8px 0;padding:4px;color:#ff0000 !important;font-family:'Helvetica Neue', Arial;\">m</p>"},
+    {"name": "elements dropped with their content", "html": "<script>steal()</script><style>p{}</style><iframe src=\"x\"></iframe><noscript><p>n</p></noscript><template><p>t</p></template><p>kept</p>", "out": "<p>kept</p>"},
+    {"name": "base goes; img keeps allowed attributes", "html": "<base href=\"https://evil.test/\"><img src=\"https://x.test/i.png\" alt=\"i\" width=\"10\" onerror=\"x()\"><img src=\"data:image/png;base64,AAAA\"><img src=\"  \">", "out": "<img src=\"https://x.test/i.png\" alt=\"i\" width=\"10\"><img src=\"data:image/png;base64,AAAA\"><img>"},
+    {"name": "tables get a tbody", "html": "<table border=\"1\" cellpadding=\"2\"><tr><td colspan=\"2\" align=\"left\">c</td></tr></table>", "out": "<table border=\"1\" cellpadding=\"2\"><tbody><tr><td colspan=\"2\" align=\"left\">c</td></tr></tbody></table>"},
+    {"name": "liquid is kept", "html": "<p>{{ first_name }} <a href=\"{{ plugins.acme.actions.vote }}?value=1\">v</a></p>", "out": "<p>{{ first_name }} <a href=\"{{ plugins.acme.actions.vote }}?value=1\">v</a></p>"},
+    {"name": "the parser closes tags", "html": "<ul><li>one<li>two</ul><br><hr><div><p>unclosed", "out": "<ul><li>one</li><li>two</li></ul><br><hr><div><p>unclosed</p></div>"},
+    {"name": "text is escaped", "html": "<p>a < b > c \"q\" 's' é &nbsp;&copy;</p>", "out": "<p>a &lt; b &gt; c \"q\" 's' é &nbsp;©</p>"},
+    {"name": "comments go", "html": "<!-- note --><p>x</p>", "out": "<p>x</p>"},
+    {"name": "old email tags", "html": "<font color=\"red\" face=\"Arial\" size=\"2\">f</font><center>c</center>", "out": "<font color=\"red\" face=\"Arial\" size=\"2\">f</font><center>c</center>"},
+    {"name": "spaces and quotes in a link are escaped", "html": "<a href=\"https://x.test/a b&quot;c\">q</a>", "out": "<a href=\"https://x.test/a%20b%22c\">q</a>"}
+  ],
+  "cron": [
+    {"cron":"0 9 * * *","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T09:00:00Z","next":"2026-11-09T09:00:00Z"},
+    {"cron":"0 9 * * *","now":"2026-11-08T09:00:00Z","previous":"2026-11-07T09:00:00Z","next":"2026-11-09T09:00:00Z"},
+    {"cron":"*/15 * * * *","now":"2026-11-08T14:31:10Z","previous":"2026-11-08T14:30:00Z","next":"2026-11-08T14:45:00Z"},
+    {"cron":"30 2 1 * *","now":"2026-11-08T14:30:00Z","previous":"2026-11-01T02:30:00Z","next":"2026-12-01T02:30:00Z"},
+    {"cron":"0 0 * * mon","now":"2026-11-08T14:30:00Z","previous":"2026-11-02T00:00:00Z","next":"2026-11-09T00:00:00Z"},
+    {"cron":"0 8 * * 1-5","now":"2026-11-08T14:30:00Z","previous":"2026-11-06T08:00:00Z","next":"2026-11-09T08:00:00Z"},
+    {"cron":"0 12 15 * 5","now":"2026-11-08T14:30:00Z","previous":"2026-11-06T12:00:00Z","next":"2026-11-13T12:00:00Z"},
+    {"cron":"0 0 1,15 * sun","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T00:00:00Z","next":"2026-11-15T00:00:00Z"},
+    {"cron":"@daily","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T00:00:00Z","next":"2026-11-09T00:00:00Z"},
+    {"cron":"@hourly","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T14:00:00Z","next":"2026-11-08T15:00:00Z"},
+    {"cron":"@weekly","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T00:00:00Z","next":"2026-11-15T00:00:00Z"},
+    {"cron":"@monthly","now":"2026-11-08T14:30:00Z","previous":"2026-11-01T00:00:00Z","next":"2026-12-01T00:00:00Z"},
+    {"cron":"@yearly","now":"2026-11-08T14:30:00Z","previous":"2026-01-01T00:00:00Z","next":"2027-01-01T00:00:00Z"},
+    {"cron":"0 0 1 jan *","now":"2026-11-08T14:30:00Z","previous":"2026-01-01T00:00:00Z","next":"2027-01-01T00:00:00Z"},
+    {"cron":"0 6,18 * * *","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T06:00:00Z","next":"2026-11-08T18:00:00Z"},
+    {"cron":"0 */6 * * *","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T12:00:00Z","next":"2026-11-08T18:00:00Z"},
+    {"cron":"10/20 * * * *","now":"2026-11-08T14:31:00Z","previous":"2026-11-08T14:30:00Z","next":"2026-11-08T14:50:00Z"},
+    {"cron":"0 0 29 2 *","now":"2026-11-08T14:30:00Z","previous":"2024-02-29T00:00:00Z","next":"2028-02-29T00:00:00Z"},
+    {"cron":"5-20/5 3 * * 0","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T03:20:00Z","next":"2026-11-15T03:05:00Z"},
+    {"cron":"0 0 * * 7","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T00:00:00Z","next":"2026-11-15T00:00:00Z"},
+    {"cron":"0 0 * 2-4 *","now":"2026-11-08T14:30:00Z","previous":"2026-04-30T00:00:00Z","next":"2027-02-01T00:00:00Z"},
+    {"cron":"0 0 L * *","now":"2026-11-08T14:30:00Z","previous":"2026-10-31T00:00:00Z","next":"2026-11-30T00:00:00Z"},
+    {"cron":"0 0 -1 * *","now":"2026-11-08T14:30:00Z","previous":"2026-10-31T00:00:00Z","next":"2026-11-30T00:00:00Z"},
+    {"cron":"0 10 * * mon#2","now":"2026-11-08T14:30:00Z","previous":"2026-10-12T10:00:00Z","next":"2026-11-09T10:00:00Z"},
+    {"cron":"0 10 * * 1#1","now":"2026-11-08T14:30:00Z","previous":"2026-11-02T10:00:00Z","next":"2026-12-07T10:00:00Z"},
+    {"cron":"0 0 * * mon#-1","now":"2026-11-08T14:30:00Z","previous":"2026-10-26T00:00:00Z","next":"2026-11-30T00:00:00Z"},
+    {"cron":"0 9 * * * America/New_York","now":"2026-11-08T14:30:00Z","previous":"2026-11-08T14:00:00Z","next":"2026-11-09T14:00:00Z"},
+    {"cron":"0 2 * * * Europe/Berlin","now":"2026-03-30T12:00:00Z","previous":"2026-03-30T00:00:00Z","next":"2026-03-31T00:00:00Z"},
+    {"cron":"nonsense","now":"2026-11-08T14:30:00Z","previous":null,"next":null},
+    {"cron":"61 * * * *","now":"2026-11-08T14:30:00Z","previous":null,"next":null},
+    {"cron":"0 0 30 2 *","now":"2026-11-08T14:30:00Z","previous":null,"next":null},
+    {"cron":"0 0 * * 5L","now":"2026-11-08T14:30:00Z","previous":null,"next":null},
+    {"cron":"0 9 * * * Mars/Olympus","now":"2026-11-08T14:30:00Z","previous":null,"next":null}
+  ],
+  "settings": [
+    {"name":"a boolean default true, nothing saved","settings":{"tag":{"type":"boolean","default":true}},"saved":{},"out":{"tag":true}},
+    {"name":"a saved value wins over the default","settings":{"tag":{"type":"boolean","default":true}},"saved":{"tag":"false"},"out":{"tag":false}},
+    {"name":"a boolean saved as on or yes is true","settings":{"a":{"type":"boolean"},"b":{"type":"boolean"}},"saved":{"a":"on","b":"yes"},"out":{"a":true,"b":true}},
+    {"name":"an integer default, nothing saved","settings":{"days":{"type":"integer","default":5}},"saved":{},"out":{"days":5}},
+    {"name":"an integer saved as text becomes a number; other text stays text","settings":{"days":{"type":"integer","default":5},"weeks":{"type":"integer"}},"saved":{"days":"12","weeks":"x"},"out":{"days":12,"weeks":"x"}},
+    {"name":"text and url defaults, nothing saved","settings":{"note":{"type":"text","default":"Hi"},"site":{"type":"url","default":"https://example.com"}},"saved":{},"out":{"note":"Hi","site":"https://example.com"}},
+    {"name":"a blank saved value counts as not set, so the default applies","settings":{"note":{"type":"string","default":"Hi"},"other":{"type":"string"}},"saved":{"note":"  ","other":""},"out":{"note":"Hi"}},
+    {"name":"a select default, nothing saved","settings":{"size":{"type":"select","options":["s","m","l"],"default":"m"}},"saved":{},"out":{"size":"m"}},
+    {"name":"a secret is never sent","settings":{"key":{"type":"string","secret":true}},"saved":{"key":"sk_live_1"},"out":{}},
+    {"name":"a saved key the manifest does not declare is not sent","settings":{"a":{"type":"string"}},"saved":{"a":"x","gone":"y"},"out":{"a":"x"}},
+    {"name":"no default and nothing saved: the key is absent","settings":{"a":{"type":"string"},"b":{"type":"boolean"}},"saved":{},"out":{}}
+  ]
+}

@@ -28,6 +28,10 @@ export type SupervisorConfig = {
   // ps binary for process RSS (default "ps" on PATH)
   psPath?: string;
   denoPath?: string;
+  // Only the kit's startTestRuntime (broadcast-plugin serve and test --local) sets this: a test call
+  // may then carry test.now (epoch ms) to start the plugin's clock there. Broadcast never sets it, so
+  // its supervisor never reads test.now.
+  testClock?: boolean;
 };
 
 type Json = unknown;
@@ -46,16 +50,21 @@ type Invocation = {
   channel: Json;
   timeoutMs: number;
   fixtures: Fixture[] | null;
+  // The plugin's clock for a test call (testClock only)
+  clockMs: number | null;
   resolve: (r: CallResult) => void;
   queueTimer?: ReturnType<typeof setTimeout>;
 };
-type Inflight = { inv: Invocation; timer: ReturnType<typeof setTimeout>; stderr: Log[] };
+// requests: the call's request log lines, from request_log messages that carried the process's key
+type Inflight = { inv: Invocation; timer: ReturnType<typeof setTimeout>; stderr: Log[]; requests: Log[] };
 type Proc = {
   entry: Entry;
   pluginId: string;
   digest: string;
   netKey: string;
   role: string;
+  // Given only to the bootstrap: a request log line must carry it (onStdout)
+  requestLogKey: string;
   child: Deno.ChildProcess;
   writer: WritableStreamDefaultWriter<Uint8Array>;
   inflight: Map<number, Inflight>;
@@ -81,6 +90,8 @@ const START_TIMEOUT_MS = 10_000;
 const MAX_LINE = 32 * 1024 * 1024;
 const MAX_FIXTURES = 100;
 const MAX_FIXTURE_BODY = 1024 * 1024;
+// 50 requests and the "N more requests not logged" line (bootstrap.ts)
+const MAX_REQUEST_LINES = 51;
 
 const BOOTSTRAP = new URL("./bootstrap.ts", import.meta.url).pathname;
 const encoder = new TextEncoder();
@@ -231,12 +242,13 @@ export function startSupervisor(config: SupervisorConfig) {
   }
 
   // Starts the process for the head of the queue and waits until the bundle has loaded.
-  async function startProc(entry: Entry, spec: PluginSpec, fixtures: Fixture[] | null): Promise<Proc> {
+  async function startProc(entry: Entry, spec: PluginSpec, fixtures: Fixture[] | null, clockMs: number | null = null): Promise<Proc> {
     const code = await loadBundle(spec.digest);
     await makeRoom(spec.id);
 
     const role = `${spec.id}#${++roleSeq}`;
     const token = randomHex(32);
+    const requestLogKey = randomHex(32);
     // A test run gets no network at all, whatever the manifest says (section 10).
     const hosts = [...spec.net, ...spec.private_net];
     const net = hosts.length && !entry.test ? [...hosts, egressHostPort] : [];
@@ -251,7 +263,7 @@ export function startSupervisor(config: SupervisorConfig) {
       "--deny-import",
       `--v8-flags=--max-old-space-size=${config.maxHeapMb},--disallow-code-generation-from-strings`,
       ...(net.length ? [`--allow-net=${net.join(",")}`] : []),
-      "--allow-env=PLUGIN_PROXY_URL,PLUGIN_PROXY_ROLE,PLUGIN_PROXY_TOKEN",
+      "--allow-env=PLUGIN_PROXY_URL,PLUGIN_PROXY_ROLE,PLUGIN_PROXY_TOKEN,PLUGIN_REQUEST_LOG_KEY",
       // Only so the bootstrap can raise its own oom_score_adj; revoked before plugin code loads.
       "--allow-write=/proc/self/oom_score_adj",
       BOOTSTRAP,
@@ -260,6 +272,7 @@ export function startSupervisor(config: SupervisorConfig) {
     const env: Record<string, string> = net.length
       ? { PLUGIN_PROXY_URL: config.egressUrl, PLUGIN_PROXY_ROLE: role, PLUGIN_PROXY_TOKEN: token }
       : {};
+    env.PLUGIN_REQUEST_LOG_KEY = requestLogKey;
     // Deno itself (not the plugin: no env permission) needs its cache directory.
     const denoDir = Deno.env.get("DENO_DIR");
     if (denoDir) env.DENO_DIR = denoDir;
@@ -280,6 +293,7 @@ export function startSupervisor(config: SupervisorConfig) {
       digest: spec.digest,
       netKey: netKey(spec),
       role,
+      requestLogKey,
       child,
       writer: child.stdin.getWriter(),
       inflight: new Map(),
@@ -308,7 +322,8 @@ export function startSupervisor(config: SupervisorConfig) {
 
     const startTimer = setTimeout(() => loaded("loading took too long"), START_TIMEOUT_MS);
     // Fixtures travel in the load message, never in env or argv.
-    write(proc, entry.test ? { t: "load", code, fixtures } : { t: "load", code });
+    // A test process serves one call, so the call's clock can start with the process
+    write(proc, entry.test ? { t: "load", code, fixtures, ...(clockMs === null ? {} : { now: clockMs }) } : { t: "load", code });
     const err = await loadedPromise;
     clearTimeout(startTimer);
     if (err) {
@@ -352,24 +367,51 @@ export function startSupervisor(config: SupervisorConfig) {
     if (msg.t === "loaded") return loaded(null);
     if (msg.t === "load_error") return loaded(String(msg.message ?? "load error"));
     if (msg.t === "host") return void hostCall(proc, msg);
+    if (msg.t === "request_log") return requestLine(proc, msg);
     if (msg.t === "result") {
       const f = proc.inflight.get(msg.id);
       if (!f) return;
+      const logs = [...withRequests(cleanLogs(msg.logs), f.requests), ...f.stderr];
       finish(proc, msg.id, msg.ok
-        ? { ok: true, result: msg.result ?? null, logs: [...cleanLogs(msg.logs), ...f.stderr] }
-        : fail(String(msg.error?.code ?? "plugin_error"), String(msg.error?.message ?? ""), [...cleanLogs(msg.logs), ...f.stderr], msg.error?.stack));
+        ? { ok: true, result: msg.result ?? null, logs }
+        : fail(String(msg.error?.code ?? "plugin_error"), String(msg.error?.message ?? ""), logs, msg.error?.stack));
     }
   }
 
+  // Plugin code shares its process with the bootstrap and can write protocol lines to stdout itself.
+  // A request line counts only with the key the bootstrap read before plugin code loaded; the time is
+  // the supervisor's own. Rails trusts kind "request" from here, and only from here.
+  function requestLine(proc: Proc, msg: Record<string, any>) {
+    const f = proc.inflight.get(msg.id);
+    if (!f || typeof msg.key !== "string" || msg.key !== proc.requestLogKey) return;
+    if (f.requests.length >= MAX_REQUEST_LINES) return;
+    f.requests.push({
+      level: ["info", "warn", "error"].includes(msg.level) ? msg.level : "info",
+      message: String(msg.message ?? "").slice(0, 4000),
+      at: now(),
+      kind: "request",
+    });
+  }
+
+  // The plugin's own lines never carry a kind, whatever it wrote
   function cleanLogs(logs: unknown): Log[] {
     if (!Array.isArray(logs)) return [];
     return logs.slice(0, 200).map((l) => ({
       level: ["info", "warn", "error"].includes(l?.level) ? l.level : "info",
       message: String(l?.message ?? "").slice(0, 4000),
       at: String(l?.at ?? now()),
-      // Only the request log's mark passes; Rails trusts no other kind from a plugin process
-      ...(l?.kind === "request" ? { kind: "request" as const } : {}),
     }));
+  }
+
+  // One list in time order; on the same time the plugin's own line comes first
+  function withRequests(own: Log[], requests: Log[]): Log[] {
+    const merged: Log[] = [];
+    let r = 0;
+    for (const line of own) {
+      while (r < requests.length && requests[r].at < line.at) merged.push(requests[r++]);
+      merged.push(line);
+    }
+    return [...merged, ...requests.slice(r)];
   }
 
   // Section 5/6: forward a host op to Rails with the call's token; the plugin never sees it.
@@ -450,7 +492,7 @@ export function startSupervisor(config: SupervisorConfig) {
       f.inv.resolve(fail("timeout", `the call took longer than ${inv.timeoutMs} ms`, f.stderr));
       stopProc(proc, { code: "crashed", message: "another call on this plugin timed out" });
     }, inv.timeoutMs);
-    proc.inflight.set(id, { inv, timer, stderr: [] });
+    proc.inflight.set(id, { inv, timer, stderr: [], requests: [] });
     write(proc, { t: "call", id, hook: inv.hook, args: inv.args, settings: inv.settings, channel: inv.channel });
   }
 
@@ -463,7 +505,7 @@ export function startSupervisor(config: SupervisorConfig) {
       if (!proc || proc.exitReason) {
         if (proc) return; // exiting; onExit pumps again
         entry.starting = true;
-        startProc(entry, head.plugin, head.fixtures).then(
+        startProc(entry, head.plugin, head.fixtures, head.clockMs).then(
           () => {
             entry.starting = false;
             pump(entry);
@@ -553,9 +595,14 @@ export function startSupervisor(config: SupervisorConfig) {
     const timeout = Number(body.timeout_ms ?? 10_000);
     if (!Number.isFinite(timeout) || timeout <= 0) return null;
     let fixtures: Fixture[] | null = null;
+    let clockMs: number | null = null;
     if (body.test !== undefined) {
       fixtures = parseFixtures(body.test);
       if (!fixtures) return null;
+      if (config.testClock === true && body.test.now !== undefined) {
+        clockMs = body.test.now;
+        if (typeof clockMs !== "number" || !Number.isFinite(clockMs) || Math.abs(clockMs) > 8.64e15) return null;
+      }
     }
     return {
       plugin: { id: p.id, version: String(p.version ?? ""), digest: p.digest, net, private_net: privateNet, keep_warm: p.keep_warm === true },
@@ -566,6 +613,7 @@ export function startSupervisor(config: SupervisorConfig) {
       channel: body.channel ?? null,
       timeoutMs: Math.min(timeout, 300_000),
       fixtures,
+      clockMs,
     };
   }
 

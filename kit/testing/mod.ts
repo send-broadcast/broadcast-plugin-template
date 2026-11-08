@@ -18,7 +18,8 @@ import { startSupervisor } from "../runtime/supervisor.ts";
 export type Json = unknown;
 export type Args = Record<string, any>;
 export type Fixture = { method?: string; url: string; status?: number; headers?: Record<string, string>; body?: string };
-export type CallOptions = { settings?: Record<string, Json>; secrets?: Record<string, string>; fixtures?: Fixture[]; timeoutMs?: number };
+// now: the plugin's clock for this call (epoch ms); Date and Temporal.Now start there
+export type CallOptions = { settings?: Record<string, Json>; secrets?: Record<string, string>; fixtures?: Fixture[]; timeoutMs?: number; now?: number };
 export type LogEntry = { level: string; message: string; at: string };
 export type Reply = { ok: boolean; result?: Json; error?: { code: string; message: string }; logs: LogEntry[]; ms?: number };
 export type HostCall = { op: string; args: Args };
@@ -43,16 +44,22 @@ const STORE_LIST_LIMIT = 100;
 export class FakeHost {
   readonly calls: HostCall[] = [];
   readonly store = new FakeStore();
-  private handlers = new Map<string, OpHandler>();
+  protected handlers = new Map<string, OpHandler>();
   private secretsByToken = new Map<string, Record<string, string>>();
 
   constructor() {
     const s = this.store;
-    this.handlers.set("store.get", (a) => s.get(a.key, a));
-    this.handlers.set("store.set", (a) => (s.set(a.key, a.value, a), true));
-    this.handlers.set("store.delete", (a) => s.delete(a.key, a));
-    this.handlers.set("store.increment", (a) => s.increment(a.key, a.by ?? 1, a));
-    this.handlers.set("store.list", (a) => s.list(a.prefix ?? "", a, { cursor: a.cursor, limit: a.limit }));
+    // Keys that start with __ are Broadcast's own (spec/plugin-api-1-vectors.json): hidden, never written
+    const own = (key: unknown) => String(key ?? "").startsWith("__");
+    const writable = (key: unknown) => {
+      if (own(key)) throw new OpError("invalid", "Store keys that start with __ are Broadcast's own.");
+      return String(key ?? "");
+    };
+    this.handlers.set("store.get", (a) => (own(a.key) ? null : s.get(a.key, a)));
+    this.handlers.set("store.set", (a) => (s.set(writable(a.key), a.value, a), true));
+    this.handlers.set("store.delete", (a) => s.delete(writable(a.key), a));
+    this.handlers.set("store.increment", (a) => s.increment(writable(a.key), a.by ?? 1, a));
+    this.handlers.set("store.list", (a) => s.list(a.prefix ?? "", a, { cursor: a.cursor, limit: a.limit, hideReserved: true }));
     this.handlers.set("events.record", () => ({ ok: true }));
     this.handlers.set("events.bulkRecord", (a) => (Array.isArray(a.items) ? a.items : []).map(() => ({ ok: true })));
     this.handlers.set("log.write", () => true);
@@ -71,6 +78,16 @@ export class FakeHost {
   /** @internal */
   async answer(op: string, args: Args, token: string): Promise<{ status: number; body: Json }> {
     this.calls.push({ op, args });
+    const started = performance.now();
+    const answer = await this.run(op, args, token);
+    this.onCall?.({ op, args, ok: (answer.body as any)?.ok === true, body: answer.body, ms: performance.now() - started });
+    return answer;
+  }
+
+  // Called after each op with what the plugin asked and what it got (the sandbox's Ops tab)
+  onCall?: (call: HostCall & { ok: boolean; body: Json; ms: number }) => void;
+
+  protected async run(op: string, args: Args, token: string): Promise<{ status: number; body: Json }> {
     if (op === "settings.secret" && !this.handlers.has(op)) {
       const value = this.secretsByToken.get(token)?.[args.name];
       if (value === undefined) return fail(404, "not_found", `no secret ${args.name}: pass it in the call's secrets`);
@@ -78,16 +95,23 @@ export class FakeHost {
     }
     const handler = this.handlers.get(op);
     if (!handler) return fail(403, "forbidden", `the test host has no op ${op}. Add it in the test: kit.host.handle("${op}", (args) => ...)`);
-    try {
-      return { status: 200, body: { ok: true, result: (await handler(args)) ?? null } };
-    } catch (err) {
-      if (err instanceof OpError) return fail(422, err.code, err.message);
-      return fail(500, "host_error", (err as Error).message);
-    }
+    return await runHandler(handler, args);
   }
 }
 
-function fail(status: number, code: string, message: string) {
+// The HTTP status Broadcast's Host API answers with for each error code (spec/plugin-api-1.json errors)
+export const ERROR_STATUS: Record<string, number> = { forbidden: 403, not_found: 404, invalid: 422, rate_limited: 429, unsupported_api: 403 };
+
+export async function runHandler(handler: OpHandler, args: Args): Promise<{ status: number; body: Json }> {
+  try {
+    return { status: 200, body: { ok: true, result: (await handler(args)) ?? null } };
+  } catch (err) {
+    if (err instanceof OpError) return fail(ERROR_STATUS[err.code] ?? 422, err.code, err.message);
+    return fail(500, "host_error", (err as Error).message);
+  }
+}
+
+export function fail(status: number, code: string, message: string) {
   return { status, body: { ok: false, error: { code, message } } };
 }
 
@@ -117,12 +141,13 @@ export class FakeStore {
     return value;
   }
   // Like the real op: rows of one scope, ordered by key, after the cursor key, at most 100
-  list(prefix: string, scope?: Scope, page: { cursor?: string; limit?: number } = {}) {
+  list(prefix: string, scope?: Scope, page: { cursor?: string; limit?: number; hideReserved?: boolean } = {}) {
     const subscriber = String(scope?.subscriber_id ?? "");
     const limit = Math.min(Math.max(Math.trunc(Number(page.limit ?? STORE_LIST_LIMIT)) || 1, 1), STORE_LIST_LIMIT);
     return [...this.rows.values()]
       .filter((row) => String(row.subscriber_id ?? "") === subscriber && row.key.startsWith(prefix))
       .filter((row) => !page.cursor || row.key > page.cursor)
+      .filter((row) => !page.hideReserved || !row.key.startsWith("__"))
       .sort((a, b) => (a.key < b.key ? -1 : 1)).slice(0, limit)
       .map(({ key, value }) => ({ key, value }));
   }
@@ -135,6 +160,11 @@ export class FakeStore {
   }
   clear() {
     this.rows.clear();
+  }
+  // Put back rows from entries() (the sandbox saves them in .sandbox/)
+  restore(entries: StoreEntry[]) {
+    this.rows.clear();
+    for (const row of entries) this.set(row.key, row.value, row.subscriber_id == null ? undefined : { subscriber_id: row.subscriber_id });
   }
 }
 
@@ -161,9 +191,10 @@ async function sha256(text: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function startTestRuntime(options: { maxHeapMb?: number } = {}): Promise<TestRuntime> {
+// options.host: the fake Host API the plugin's ops reach (the sandbox passes its SandboxHost)
+export async function startTestRuntime(options: { maxHeapMb?: number; host?: FakeHost } = {}): Promise<TestRuntime> {
   const secret = crypto.randomUUID().replaceAll("-", "").repeat(2);
-  const host = new FakeHost();
+  const host = options.host ?? new FakeHost();
   const bundles = new Map<string, string>();
 
   const server = Deno.serve({ port: 0, hostname: "127.0.0.1", onListen: () => {} }, async (req) => {
@@ -195,6 +226,8 @@ export async function startTestRuntime(options: { maxHeapMb?: number } = {}): Pr
     memoryLimitMb: 1024,
     maxHeapMb: options.maxHeapMb ?? 128,
     safeMode: false,
+    // Only this harness lets a call set the plugin's clock (test.now); Broadcast's supervisor never does
+    testClock: true,
   });
   const runtimeUrl = `http://127.0.0.1:${supervisor.port}`;
   let seq = 0;
@@ -220,7 +253,7 @@ export async function startTestRuntime(options: { maxHeapMb?: number } = {}): Pr
           args,
           settings: callOptions.settings ?? {},
           timeout_ms: callOptions.timeoutMs ?? 10_000,
-          test: { fixtures: callOptions.fixtures ?? [] },
+          test: { fixtures: callOptions.fixtures ?? [], ...(callOptions.now === undefined ? {} : { now: callOptions.now }) },
         }),
       });
       if (res.status !== 200) throw new Error(`the runtime refused the call (HTTP ${res.status}): ${await res.text()}`);

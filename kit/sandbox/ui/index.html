@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{plugin_name}} · Broadcast sandbox</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="side" aria-label="Sandbox">
+    <div class="brand">Broadcast sandbox<small id="plugin-line">{{plugin_name}}</small></div>
+    <div id="page-links"></div>
+    <div class="sep"></div>
+    <a href="#compose" data-view="compose">Compose</a>
+    <a href="#inbox" data-view="inbox">Inbox <span class="count" id="inbox-count"></span></a>
+    <a href="#people" data-view="people">People</a>
+    <a href="#events" data-view="events">Events</a>
+    <a href="#time" data-view="time">Time</a>
+    <a href="#ops" data-view="ops">Ops <span class="count" id="ops-count"></span></a>
+    <a href="#store" data-view="store">Store</a>
+    <a href="#logs" data-view="logs">Logs</a>
+    <a href="#settings" data-view="settings">Settings</a>
+  </nav>
+  <main id="main" tabindex="-1"></main>
+</div>
+<dialog id="open-link">
+  <form method="dialog">
+    <h2>Open a link?</h2>
+    <p>The plugin page wants to open this address in a new tab:</p>
+    <p class="mono" id="open-link-address"></p>
+    <div class="row">
+      <button value="cancel">Cancel</button>
+      <a class="button primary" id="open-link-go" target="_blank" rel="noopener noreferrer">Open link</a>
+    </div>
+  </form>
+</dialog>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

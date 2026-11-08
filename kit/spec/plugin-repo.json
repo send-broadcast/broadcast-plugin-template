@@ -147,6 +147,12 @@
         "message": "A private SSH key must not be in the repo."
       },
       {
+        "id": "sandbox-data",
+        "level": "error",
+        "pattern": ".sandbox",
+        "message": ".sandbox/ holds the test data of `broadcast-plugin serve`. Remove it from the repo and add it to .gitignore."
+      },
+      {
         "id": "package-file",
         "level": "error",
         "pattern": "*.broadcast-plugin",

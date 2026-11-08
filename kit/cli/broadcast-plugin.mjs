@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // broadcast-plugin: write, build, pack and test Broadcast plugins (see ../AGENTS.md).
 // Node 22, no dependencies. esbuild is used when it is on PATH; it is never downloaded.
-import { spawnSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "node:fs";
+import { delimiter, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkBundle } from "./lib/check.mjs";
 import { checkImports } from "./lib/imports.mjs";
 import { checkRepo } from "./lib/repo_check.mjs";
 import { loadSpec } from "./lib/spec.mjs";
 import { callTool, mcpConfig, ToolError } from "./lib/mcp.mjs";
+import { audit, dev, doctor, recordFixture, release } from "./lib/tools.mjs";
+import { removeCredentials, saveCredentials, storeConfig, StoreError, storeUrl, submitPackage, versions, whoami } from "./lib/store.mjs";
 import { ALLOWED_FILES, ALLOWED_FOLDERS, packagePathError, zipFiles } from "./lib/zip.mjs";
 
 const KIT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,7 +27,9 @@ const HELP = `broadcast-plugin <command> [options]
   build          src/main.ts or src/main.js -> dist/main.js (esbuild when it is on PATH; else a
                  copy of an entry without imports), then check it like the server does.
   check          Check the repo layout and manifest.json with the plugin store's structure rules
-                 (spec/plugin-repo.json). Errors exit 1; warnings do not.
+                 (spec/plugin-repo.json). Errors exit 1; warnings do not. In a git repo, files git
+                 would not commit (dist/, .sandbox/ in .gitignore) are left out, as the store sees
+                 only the commit.
   pack           Write <id>-<version>.broadcast-plugin (manifest.json, dist/main.js, src/, ui/,
                  assets/, README.md, LICENSE).
 
@@ -34,6 +38,35 @@ const HELP = `broadcast-plugin <command> [options]
                  deno on PATH). The store, events and logs are faked; fetch answers only from
                  fixtures. Prints the reply and the ops the plugin used. For tests in code, see
                  testing/mod.ts.
+  serve [--port 8080]
+                 Build, then open the sandbox at http://localhost:8080: the plugin in the real
+                 runtime against a fake Broadcast with 25 test people (needs deno on PATH). Its
+                 pages, Compose and Inbox, People, Events (batches, send again), Time (a clock,
+                 schedules, lifecycle hooks), Ops, Store, Logs and Settings. Data stays in
+                 .sandbox/, never in the repo. A change in src/ or manifest.json builds and reloads
+                 the plugin (the data stays; onUpgrade runs when declared; new permissions are
+                 listed); a change in ui/ or assets/ refreshes.
+  dev [--once] [--hook ... (as test --local)]
+                 Build and run the tests (deno task test) now and on each change in src/, ui/,
+                 test/ or manifest.json. --once runs one time and exits 1 when the tests fail.
+  fixtures record <url> [--method GET] [--header 'name: value'] [--body <text>] [--out test/fixtures.json]
+                 Make the real request and keep its response as a test fixture (status, content
+                 type, body). Request headers are never written.
+  audit [--json] What a reviewer sees: permissions, hosts, hooks, secret settings, pages, and the
+                 problems of check and the bundle rules. Exits 1 on a problem.
+  release <patch|minor|major|x.y.z> [--notes <text>]
+                 Set the version (and listing.changelog), commit manifest.json and tag v<version>.
+                 Refuses when other files have uncommitted changes.
+  doctor         Check node, deno, esbuild, the repo, the kit, the server and the store login.
+
+  These talk to the plugin store (sendbroadcast.net; env BROADCAST_STORE_URL to change it):
+  login          Read a publishing token from stdin (Dashboard > Plugins > Publishing token),
+                 check it, and keep it in ~/.config/broadcast-plugin (BROADCAST_PUBLISHER_TOKEN wins).
+  logout         Remove the kept token.
+  publish [--summary <text>] [--category <slug>]
+                 check, build and pack, then send the package to the store for review.
+  status         The store's review state of each version of this plugin.
+
   These talk to your server (env BROADCAST_URL and BROADCAST_TOKEN, a plugin developer token):
   push           Create or reuse the draft for this plugin's id and upload its files.
   test [--hook onEvent] [--args <json|file>] [--fixtures <json|file>] [--settings <json|file>]
@@ -50,7 +83,7 @@ Options for every command: --dir <plugin folder> (default: the current folder).`
 class Fail extends Error {}
 
 // Flags that take no value
-const SWITCHES = new Set(["local"]);
+const SWITCHES = new Set(["local", "once", "json"]);
 
 function parseArgs(argv) {
   const positional = [];
@@ -134,8 +167,20 @@ function copyKit(target) {
 
 // --- check ---
 
+// The paths of the folder that git would commit: tracked files, and untracked files it does not
+// ignore. null when the folder is not in a git work tree (or git is not there).
+function gitFiles(dir) {
+  const res = spawnSync("git", ["-C", dir, "--literal-pathspecs", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."], { encoding: "utf8" });
+  if (res.status !== 0) return null;
+  return res.stdout.split("\0").filter(Boolean);
+}
+
 function checkCommand(dir) {
-  const problems = checkRepo(dir, loadSpec());
+  // The plugin store sees only what is committed. In a git repo, the check looks only at the files
+  // git would commit: dist/ or serve's .sandbox/ in .gitignore are not there, do not count toward the
+  // limits, and an ignored README.md is missing, as in the store.
+  const files = gitFiles(dir);
+  const problems = checkRepo(dir, loadSpec(), { only: files ? new Set(files) : null });
   const line = (problem) => `${problem.level} ${problem.id}: ${problem.message}`;
   for (const problem of problems.filter((p) => p.level === "warning")) console.log(line(problem));
   const errors = problems.filter((p) => p.level === "error");
@@ -168,7 +213,7 @@ function sourceFiles(dir) {
   return files;
 }
 
-function build(dir) {
+function build(dir, { quiet = false } = {}) {
   const entry = ["src/main.ts", "src/main.js"].map((p) => join(dir, p)).find((p) => existsSync(p));
   if (!entry) throw new Fail("No src/main.ts or src/main.js.");
   const out = join(dir, "dist", "main.js");
@@ -202,7 +247,7 @@ function build(dir) {
   if (problems.length) {
     throw new Fail(`dist/main.js breaks the bundle rules:\n  ${problems.join("\n  ")}\n${SERVER_NOTE}`);
   }
-  console.log(`Built dist/main.js${esbuild ? ` with esbuild ${version}` : " (copied: no imports)"}. ${SERVER_NOTE}`);
+  if (!quiet) console.log(`Built dist/main.js${esbuild ? ` with esbuild ${version}` : " (copied: no imports)"}. ${SERVER_NOTE}`);
 }
 
 // --- files of a plugin, for pack and push ---
@@ -244,6 +289,50 @@ function pack(dir) {
   const name = `${manifest.id}-${manifest.version}.broadcast-plugin`;
   writeFileSync(join(dir, name), zip);
   console.log(`Wrote ${name} (${files.length} files, ${zip.length} bytes).`);
+  return { name, zip };
+}
+
+// --- plugin store commands (publisher token) ---
+
+async function readStdin() {
+  if (process.stdin.isTTY) process.stderr.write("Paste the publishing token (Dashboard > Plugins > Publishing token), then press Enter: ");
+  let text = "";
+  for await (const chunk of process.stdin) {
+    text += chunk;
+    if (text.includes("\n")) break;
+  }
+  return text.split("\n")[0].trim();
+}
+
+async function login() {
+  const token = await readStdin();
+  if (!token) throw new Fail("No token given.");
+  const url = storeUrl();
+  const { publisher } = await whoami({ url, token });
+  saveCredentials(url, token);
+  console.log(`Logged in to ${url} as ${publisher.name}${publisher.verified ? " (verified)" : ""}.`);
+}
+
+async function publish(dir, flags) {
+  const config = storeConfig();
+  checkCommand(dir);
+  build(dir);
+  const { name, zip } = pack(dir);
+  const result = await submitPackage(config, { name, zip, summary: flags.summary, category: flags.category });
+  console.log(`Sent ${result.plugin_id} ${result.version} to the plugin store: ${result.status}.`);
+  if (result.url) console.log(`Follow the review: ${result.url}`);
+}
+
+async function status(dir, flags) {
+  const config = storeConfig();
+  const id = flags.key ?? readManifest(dir).id;
+  const result = await versions(config, id);
+  console.log(`${result.plugin_id}${result.listed ? " (listed)" : ""}${result.url ? `  ${result.url}` : ""}`);
+  for (const v of result.versions ?? []) {
+    const notes = [v.submitted_at && `submitted ${v.submitted_at}`, v.decided_at && `decided ${v.decided_at}`,
+      v.open_messages > 0 && `${v.open_messages} message${v.open_messages === 1 ? "" : "s"} to answer`, v.block_notice].filter(Boolean);
+    console.log(`  ${String(v.version).padEnd(10)} ${String(v.status).padEnd(16)} ${notes.join(", ")}`);
+  }
 }
 
 // --- server commands ---
@@ -313,6 +402,78 @@ async function testRun(dir, flags) {
   if (result?.ok === false) throw new Fail(`The hook failed: ${result.error?.code}: ${result.error?.message}`);
 }
 
+// The sandbox screen (sandbox/serve.ts), run by deno until Ctrl+C. It may write only .sandbox/.
+async function serve(dir, flags) {
+  readManifest(dir);
+  const deno = findOnPath("deno");
+  if (!deno) throw new Fail("deno is not on PATH. serve runs the plugin in the Broadcast runtime, which needs Deno 2 (https://deno.com).");
+  const port = Number(flags.port ?? 8080);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Fail("--port must be a number from 1 to 65535.");
+  build(dir);
+  const root = resolve(dir);
+  // Read: the plugin folder, the kit (screen and Signal files) and the deno binary (the runtime starts
+  // each plugin process with Deno.execPath()). Write: .sandbox/ only. Net: 127.0.0.1 only (the screen,
+  // the fake Host API and the runtime). Run: deno for plugin processes, ps for their memory.
+  // deno on PATH is often a symlink; Deno.execPath() gives the real file
+  const read = [...new Set([root, KIT, deno, realpathSync(deno)])].join(",");
+  const child = spawn(deno, ["run", "--no-prompt", "--quiet", "--allow-net=127.0.0.1", `--allow-read=${read}`, `--allow-write=${join(root, ".sandbox")}`,
+    "--allow-run", "--allow-env", join(KIT, "sandbox", "serve.ts"), JSON.stringify({ dir: root, port })], { stdio: "inherit" });
+  const watcher = watchForReload(dir, root, port);
+  const stop = () => child.kill("SIGINT");
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  const code = await new Promise((done) => child.on("exit", (exit, signal) => done(signal ? 0 : exit ?? 1)));
+  watcher.close();
+  if (code !== 0) process.exitCode = code;
+}
+
+// Hot reload for serve: a change in src/ or manifest.json builds and reloads the plugin; a change in
+// ui/ or assets/ refreshes the screen; a failed build shows on the screen and here.
+function watchForReload(dir, root, port) {
+  const call = async (path, body) => {
+    try {
+      const res = await fetch(`http://localhost:${port}${path}`, {
+        method: "POST", headers: { "x-sandbox": "1", "content-type": "application/json" }, body: JSON.stringify(body ?? {}),
+      });
+      return await res.json();
+    } catch {
+      return null;
+    }
+  };
+  const pending = new Set();
+  let timer = null;
+  let running = Promise.resolve();
+  const flush = async () => {
+    const files = [...pending];
+    pending.clear();
+    if (!files.some((f) => f.startsWith("src/") || f === "manifest.json")) {
+      console.log(`change  ${files.join(", ")}`);
+      await call("/api/refresh");
+      return;
+    }
+    try {
+      build(dir, { quiet: true });
+    } catch (err) {
+      const message = err instanceof Fail ? err.message : String(err?.message ?? err);
+      console.error(`build   failed: ${message}`);
+      await call("/api/build-error", { message });
+      return;
+    }
+    const answer = await call("/api/reload");
+    console.log(`reload  ${answer?.message ?? "the sandbox did not answer"}`);
+  };
+  return watch(root, { recursive: true }, (_event, file) => {
+    if (!file) return;
+    const path = String(file).split(sep).join("/");
+    if (!/^(src|ui|assets)\//.test(path) && path !== "manifest.json") return;
+    // Hidden, swap and backup files that editors and tools write next to the real one
+    if (path.split("/").some((part) => part.startsWith(".") || part.endsWith("~") || /^#.*#$/.test(part) || /\.(swp|swx|tmp)$/.test(part))) return;
+    pending.add(path);
+    clearTimeout(timer);
+    timer = setTimeout(() => (running = running.then(flush)), 150);
+  });
+}
+
 // The kit's own runtime (runtime/, testing/), run by deno: no server, no network
 function testLocal(dir, flags) {
   readManifest(dir);
@@ -373,6 +534,29 @@ async function main(argv) {
       if (result?.valid === false) throw new Fail("The draft is not valid.");
       return;
     }
+    case "release":
+      return release(dir, positional, flags, { readManifest, Fail });
+    case "doctor":
+      if (!(await doctor(dir, { findOnPath, KIT }))) throw new Fail("doctor found a problem (fail above).");
+      return;
+    case "fixtures":
+      return await recordFixture(dir, positional, flags, { Fail });
+    case "audit":
+      if (!audit(dir, flags, { readManifest, build, Fail })) process.exitCode = 1;
+      return;
+    case "dev":
+      if (!(await dev(dir, flags, { build, testLocal, findOnPath, Fail }))) process.exitCode = 1;
+      return;
+    case "serve":
+      return await serve(dir, flags);
+    case "login":
+      return await login();
+    case "logout":
+      return console.log(removeCredentials() ? "Logged out: the publisher token is removed." : "No saved publisher token.");
+    case "publish":
+      return await publish(dir, flags);
+    case "status":
+      return await status(dir, flags);
     case "submit": {
       print(await callTool(mcpConfig(), "plugin_draft_request_deploy", { plugin_key: key() }));
       return console.log("Submitted. An admin must review and deploy it in Application > Plugins.");
@@ -382,10 +566,50 @@ async function main(argv) {
   }
 }
 
+// --name=value is the same as --name value
+function splitEquals(argv) {
+  return argv.flatMap((arg) => {
+    const match = arg.match(/^(--[^=]+)=(.*)$/s);
+    return match ? [match[1], match[2]] : [arg];
+  });
+}
+
+// Installed globally (npm i -g @send-broadcast/plugin-kit), the command runs the plugin repo's
+// pinned kit/ when the repo has one, so a repo builds and tests with the kit it pins. Only for the
+// commands that run the repo's own code anyway: check, audit and the rest are how a reviewer looks
+// at a repo not yet trusted, so they never run its kit/. Not when kit/ is this kit, and not again
+// from the pinned kit.
+const PINNED_COMMANDS = new Set(["build", "test", "dev", "serve", "pack"]);
+
+function runPinnedKit(argv) {
+  if (!PINNED_COMMANDS.has(argv[0]) || process.env.BROADCAST_PLUGIN_PINNED === "1") return null;
+  const at = argv.indexOf("--dir");
+  const dir = resolve(at >= 0 && argv[at + 1] ? argv[at + 1] : ".");
+  const pinned = join(dir, "kit", "cli", "broadcast-plugin.mjs");
+  if (!existsSync(pinned) || realpathSync(pinned) === realpathSync(fileURLToPath(import.meta.url))) return null;
+  const versionOf = (root) => {
+    try {
+      return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version ?? "?";
+    } catch {
+      return "?";
+    }
+  };
+  const [mine, theirs] = [versionOf(KIT), versionOf(join(dir, "kit"))];
+  if (mine !== theirs) {
+    console.error(`broadcast-plugin: using the repo's pinned kit/ (${theirs}); this command is ${mine}. To update kit/, see "The kit" in AGENTS.md (or set BROADCAST_PLUGIN_PINNED=1 to use ${mine}).`);
+  }
+  const res = spawnSync(process.execPath, [pinned, ...argv], { stdio: "inherit", env: { ...process.env, BROADCAST_PLUGIN_PINNED: "1" } });
+  return res.status ?? 1;
+}
+
+const ARGS = splitEquals(process.argv.slice(2));
+const pinnedExit = runPinnedKit(ARGS);
+if (pinnedExit !== null) process.exit(pinnedExit);
+
 try {
-  await main(process.argv.slice(2));
+  await main(ARGS);
 } catch (err) {
-  if (err instanceof Fail || err instanceof ToolError) {
+  if (err instanceof Fail || err instanceof ToolError || err instanceof StoreError) {
     console.error(err.message);
     process.exit(1);
   }

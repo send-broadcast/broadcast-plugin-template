@@ -1,6 +1,6 @@
 // Runs inside each plugin process (V3-IMPLEMENTATION.md section 5). The supervisor starts it as
 //   deno run --no-prompt --no-config --no-lock --cached-only --v8-flags=... [--allow-net=...]
-//     --allow-env=PLUGIN_PROXY_URL,PLUGIN_PROXY_ROLE,PLUGIN_PROXY_TOKEN
+//     --allow-env=PLUGIN_PROXY_URL,PLUGIN_PROXY_ROLE,PLUGIN_PROXY_TOKEN,PLUGIN_REQUEST_LOG_KEY
 //     --allow-write=/proc/self/oom_score_adj bootstrap.ts
 // and talks to it with newline-delimited JSON on stdin/stdout.
 //
@@ -18,19 +18,21 @@
 //
 // Test runs (section 10): the load message carries `fixtures`, the process has no net permission,
 // and fetch answers from the fixtures (same method; URL equal, or a prefix when it ends with "*").
+// In the kit's sandbox it may also carry `now`: the plugin's clock starts there (setClock).
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
 type Json = unknown;
 type Msg = Record<string, any>;
-// kind "request": a line of the request log (the plugin's own lines have no kind)
-type LogEntry = { level: "info" | "warn" | "error"; message: string; at: string; kind?: "request" };
+type LogEntry = { level: "info" | "warn" | "error"; message: string; at: string };
 
-// 1. Read the proxy credential, then remove env access before any plugin code exists.
+// 1. Read the proxy credential and the request log key, then remove env access before any plugin
+// code exists.
 const PROXY_URL = Deno.env.get("PLUGIN_PROXY_URL") ?? "";
 const PROXY_ROLE = Deno.env.get("PLUGIN_PROXY_ROLE") ?? "";
 const PROXY_TOKEN = Deno.env.get("PLUGIN_PROXY_TOKEN") ?? "";
-for (const name of ["PLUGIN_PROXY_URL", "PLUGIN_PROXY_ROLE", "PLUGIN_PROXY_TOKEN"]) Deno.env.delete(name);
+const REQUEST_LOG_KEY = Deno.env.get("PLUGIN_REQUEST_LOG_KEY") ?? "";
+for (const name of ["PLUGIN_PROXY_URL", "PLUGIN_PROXY_ROLE", "PLUGIN_PROXY_TOKEN", "PLUGIN_REQUEST_LOG_KEY"]) Deno.env.delete(name);
 Deno.permissions.revokeSync({ name: "env" });
 
 // 2. The kernel OOM killer must pick a plugin, never the supervisor. Then drop the write grant.
@@ -70,6 +72,31 @@ function writeAll(write: (b: Uint8Array) => number, bytes: Uint8Array) {
 
 function send(msg: Msg) {
   writeAll(stdoutWrite, encoder.encode(JSON.stringify(msg) + "\n"));
+}
+
+// A request log line goes out on its own with the key, so the supervisor can tell it from a line
+// plugin code writes to stdout itself. Plugin code shares this process and can replace built-ins
+// (JSON.stringify, TextEncoder, Uint8Array and Array methods, toJSON): the key is joined into the
+// line with + only, and the line is encoded and written with functions kept from before plugin code
+// loads, so no replaced built-in ever sees it.
+// deno-lint-ignore no-explicit-any
+const callOf = (fn: (...a: any[]) => unknown) => Function.prototype.call.bind(fn) as (self: unknown, ...a: unknown[]) => unknown;
+const jsonString = JSON.stringify;
+const encodeText = callOf(TextEncoder.prototype.encode);
+const byteLength = callOf(Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "length")!.get!);
+const bufferOf = callOf(Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "buffer")!.get!);
+const byteOffsetOf = callOf(Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteOffset")!.get!);
+const Bytes = Uint8Array;
+
+function sendRequestLine(id: number, level: LogEntry["level"], message: string) {
+  const line = '{"t":"request_log","id":' + jsonString(id) + ',"key":' + jsonString(REQUEST_LOG_KEY) +
+    ',"level":' + jsonString(level) + ',"message":' + jsonString(message) + "}\n";
+  const bytes = encodeText(encoder, line) as Uint8Array;
+  const total = byteLength(bytes) as number;
+  let off = 0;
+  while (off < total) {
+    off += stdoutWrite(off === 0 ? bytes : new Bytes(bufferOf(bytes) as ArrayBuffer, (byteOffsetOf(bytes) as number) + off, total - off));
+  }
 }
 
 function format(args: unknown[]): string {
@@ -128,9 +155,53 @@ function fixtureFetch(fixtures: Fixture[]) {
   };
 }
 
-async function load(code: string, fixtures: unknown) {
+// The sandbox's clock for a test run: Date and Temporal.Now start at nowMs and run on from there.
+// Set before the plugin's code loads; the globals are locked and the real Date is not reachable, so
+// the plugin cannot put the clock back. Dates made from a value, Date.parse and Date.UTC are unchanged.
+function setClock(nowMs: number) {
+  const Real = Date;
+  const realNow = Real.now.bind(Real);
+  const offset = nowMs - realNow();
+  const now = () => realNow() + offset;
+  const lock = (target: object, key: string, value: unknown) =>
+    Object.defineProperty(target, key, { value, writable: false, enumerable: false, configurable: false });
+  // A function, not a subclass: Object.getPrototypeOf(Date) must not lead to the real Date
+  const Clock = function (this: unknown, ...args: unknown[]) {
+    if (!new.target) return new Real(now()).toString();
+    return Reflect.construct(Real, args.length ? args : [now()], new.target);
+  } as unknown as DateConstructor;
+  lock(Clock, "now", now);
+  lock(Clock, "parse", Real.parse);
+  lock(Clock, "UTC", Real.UTC);
+  Object.defineProperty(Clock, "prototype", { value: Real.prototype, writable: false });
+  Object.defineProperty(Clock, "name", { value: "Date" });
+  Object.defineProperty(Clock, "length", { value: 7 });
+  lock(Real.prototype, "constructor", Clock);
+  lock(globalThis, "Date", Clock);
+
+  type Zoned = { toPlainDateTime(): unknown; toPlainDate(): unknown; toPlainTime(): unknown };
+  type TemporalApi = { Now?: { timeZoneId(): string }; Instant: { fromEpochMilliseconds(ms: number): { toZonedDateTimeISO(zone: string): Zoned } } };
+  const temporal = (globalThis as { Temporal?: TemporalApi }).Temporal;
+  if (temporal?.Now) {
+    const real = temporal.Now;
+    const Instant = temporal.Instant;
+    const instant = () => Instant.fromEpochMilliseconds(now());
+    const zoned = (zone?: string) => instant().toZonedDateTimeISO(zone ?? real.timeZoneId());
+    lock(temporal, "Now", Object.freeze({
+      instant,
+      timeZoneId: () => real.timeZoneId(),
+      zonedDateTimeISO: zoned,
+      plainDateTimeISO: (zone?: string) => zoned(zone).toPlainDateTime(),
+      plainDateISO: (zone?: string) => zoned(zone).toPlainDate(),
+      plainTimeISO: (zone?: string) => zoned(zone).toPlainTime(),
+    }));
+  }
+}
+
+async function load(code: string, fixtures: unknown, nowMs?: unknown) {
   try {
     if (Array.isArray(fixtures)) baseFetch = fixtureFetch(fixtures);
+    if (Array.isArray(fixtures) && typeof nowMs === "number" && Number.isFinite(nowMs)) setClock(nowMs);
     const mod = await import("data:application/javascript;base64," + base64(encoder.encode(code)));
     if (!mod.default || typeof mod.default !== "object") throw new Error("the bundle must export default definePlugin({...})");
     plugin = mod.default;
@@ -165,7 +236,7 @@ const liveCalls = new Set<number>();
 // so concurrent calls of one plugin each get their own requests.
 const MAX_REQUEST_LINES = 50;
 const currentCall = new AsyncLocalStorage<number>();
-const requestLogs = new Map<number, { logs: LogEntry[]; lines: number; more: number }>();
+const requestLogs = new Map<number, { lines: number; more: number }>();
 
 function noteRequest(level: LogEntry["level"], message: string) {
   const id = currentCall.getStore();
@@ -176,7 +247,9 @@ function noteRequest(level: LogEntry["level"], message: string) {
     return;
   }
   entry.lines++;
-  if (entry.logs.length < 200) entry.logs.push({ level, message, at: new Date().toISOString(), kind: "request" });
+  try {
+    sendRequestLine(id!, level, message);
+  } catch { /* stdout closed */ }
 }
 
 // Method and URL without reading the body (a stream body must stay unread); no query, it can hold a token
@@ -207,8 +280,10 @@ async function recordFetch(input: RequestInfo | URL, init?: RequestInit): Promis
 function endRequestLog(id: number) {
   const entry = requestLogs.get(id);
   requestLogs.delete(id);
-  if (entry?.more && entry.logs.length < 200) {
-    entry.logs.push({ level: "info", message: `fetch: ${entry.more} more requests not logged`, at: new Date().toISOString(), kind: "request" });
+  if (entry?.more) {
+    try {
+      sendRequestLine(id, "info", `fetch: ${entry.more} more requests not logged`);
+    } catch { /* stdout closed */ }
   }
 }
 const pendingHost = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
@@ -344,7 +419,7 @@ async function runCall(msg: Msg) {
   const args = Array.isArray(msg.args) ? msg.args : [];
   const logs: LogEntry[] = [];
   liveCalls.add(id);
-  requestLogs.set(id, { logs, lines: 0, more: 0 });
+  requestLogs.set(id, { lines: 0, more: 0 });
   try {
     const fn = msg.hook === "onEvents" ? resolveOnEvents() : resolveHook(String(msg.hook), args);
     if (!fn) {
@@ -372,7 +447,7 @@ async function runCall(msg: Msg) {
 }
 
 function handle(msg: Msg) {
-  if (msg.t === "load") return load(String(msg.code ?? ""), msg.fixtures);
+  if (msg.t === "load") return load(String(msg.code ?? ""), msg.fixtures, msg.now);
   if (msg.t === "call") return runCall(msg);
   if (msg.t === "host_result") {
     const p = pendingHost.get(msg.rid);

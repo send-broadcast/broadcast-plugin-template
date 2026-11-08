@@ -26,6 +26,10 @@ Test runs have no network: `fetch` answers only from the `fixtures` you pass. Su
 generated (`person1@example.test` ...). Writes are simulated. Settings and secrets come only from
 the `settings` and `secrets` you pass.
 
+In a plugin repo with the kit, `broadcast-plugin serve` gives the same kind of test world on your
+computer, with no server: the plugin's pages, an email flow, events, a clock for schedules and
+lifecycle hooks, and hot reload. Its data stays in `.sandbox/`, which never goes into the repo.
+
 ## 3. Files
 
 ```
@@ -43,7 +47,7 @@ README.md           optional
 - No `import` or `export ... from`, no `import()`, no `import.meta`. Inline every dependency.
 - No `eval`, `new Function` or `Function()` (they also fail at run time).
 - Readable code: no line longer than 2,000 characters (no minified code). The admin reviews it.
-- TypeScript: compile to JavaScript first (`node path/to/plugin_kit/cli/broadcast-plugin.mjs build`; the kit is not on npm).
+- TypeScript: compile to JavaScript first (`broadcast-plugin build`, from `npm install --global @send-broadcast/plugin-kit`).
 
 ## 4. manifest.json
 
@@ -79,7 +83,12 @@ README.md           optional
   one, `validate` gives a warning with the date Broadcast stops serving it; after that date the
   plugin stops until it moves to the current major.
 - `settings` types: `string`, `text`, `url`, `integer`, `boolean`, `select` (with `options`).
-  Mark keys, tokens and webhook URLs `"secret": true`.
+  Mark keys, tokens and webhook URLs `"secret": true`. `ctx.settings.get` gives a boolean as
+  `true`/`false` and an integer as a number.
+- `"default"`: what `ctx.settings.get` gives until an admin saves a value (an empty saved value
+  counts as none); the settings form starts with it, and a `required` setting with a default
+  that is not empty is not missing. It must match the type (a whole number, `true`/`false`, one of the `options`, a
+  string, or an `http(s)://` address or `""` for `url`). A secret cannot have one.
 
 ### Icon and listing
 
@@ -107,9 +116,9 @@ Ask for the least. Each permission is shown to the admin in plain language.
 | Manifest | Allows | Level |
 |---|---|---|
 | (none) | its own settings, store, logs, events; the channel name | basic |
-| `"subscribers": "read"` | `subscribers.get/find/list` (first 100) | standard |
+| `"subscribers": "read"` | `subscribers.get/find/list` (list: first 100; get, find, update: 1,000 different people per channel and hour) | standard |
 | `"subscribers": "write"` | read, plus `update` and `bulkUpsert` of existing people | standard |
-| `"subscribers": ["read", "export"]` | list beyond 100 and next pages | sensitive |
+| `"subscribers": ["read", "export"]` | list beyond 100 and next pages; no hourly limit on get, find, update | sensitive |
 | `"subscribers": ["write", "create"]` | `bulkUpsert` may create people | sensitive |
 | `"tags": "read"` / `"write"` | list tags / add and remove tags | standard |
 | `"broadcasts": "read"`, `"sequences": "read"`, `"segments": "read"` | read those | standard |

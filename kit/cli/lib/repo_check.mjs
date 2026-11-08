@@ -11,8 +11,10 @@ function patternToRegExp(pattern) {
 }
 
 // Every entry under root: { path, type: "file" | "folder" | "symlink", size }. Skipped names (at the
-// root only) and forbidden folders are not looked into.
-function walk(root, spec, problems) {
+// root only) and forbidden folders are not looked into. With only (the paths git would commit), every
+// other file, and every folder with none of those files, is left out.
+function walk(root, spec, problems, only) {
+  const folders = only ? new Set([...only].flatMap((path) => path.split("/").slice(0, -1).map((_, i, parts) => `${parts.slice(0, i + 1).join("/")}/`))) : null;
   const forbidden = spec.repo.forbidden.map((rule) => ({ ...rule, regexp: patternToRegExp(rule.pattern) }));
   const exceptions = new Set(spec.repo.forbiddenExceptions.map((name) => name.toLowerCase()));
   const entries = [];
@@ -24,6 +26,7 @@ function walk(root, spec, problems) {
       const stat = lstatSync(join(root, path));
       const folder = stat.isDirectory();
       const shown = folder ? `${path}/` : path;
+      if (only && (folder ? !folders.has(shown) : !only.has(path))) continue;
       if (stat.isSymbolicLink()) {
         problems.push({ id: spec.repo.symlinks.id, level: spec.repo.symlinks.level, path, message: spec.repo.symlinks.message });
         continue;
@@ -89,9 +92,11 @@ export function srcFiles(root, files) {
   return new Map([...files.keys()].filter((path) => path.startsWith("src/")).map((path) => [path, readFileSync(join(root, path))]));
 }
 
-export function checkRepo(root, spec) {
+// only: a Set of the repo's paths to look at (in a git repo, the files git would commit); the plugin
+// store and the shared vectors check the whole tree.
+export function checkRepo(root, spec, { only = null } = {}) {
   const problems = [];
-  const entries = walk(root, spec, problems);
+  const entries = walk(root, spec, problems, only);
   const files = new Map(entries.filter((entry) => entry.type === "file").map((entry) => [entry.path, entry.size]));
 
   for (const rule of spec.repo.rules) {

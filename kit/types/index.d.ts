@@ -252,6 +252,10 @@ export interface SettingDefinition {
   secret?: boolean;
   required?: boolean;
   options?: (string | { value: string; label?: string })[];
+  /** What ctx.settings.get gives until an admin saves a value; the form starts with it. Must match
+   * the type (integer: a whole number; boolean: true/false; select: one of options; url: "" or an
+   * http(s) address). Not allowed on a secret. */
+  default?: string | number | boolean;
   [key: string]: unknown;
 }
 

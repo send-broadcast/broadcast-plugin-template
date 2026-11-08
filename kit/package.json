@@ -1,11 +1,15 @@
 {
-  "name": "broadcast-plugin",
-  "version": "0.1.0",
-  "description": "Write, build, pack and test Broadcast plugins.",
+  "name": "@send-broadcast/plugin-kit",
+  "version": "1.0.0",
+  "description": "Write, build, test and publish Broadcast plugins: the broadcast-plugin command, the plugin runtime, the local sandbox (broadcast-plugin serve), types and templates.",
   "type": "module",
-  "private": true,
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://sendbroadcast.net/docs/plugins",
+  "keywords": ["broadcast", "email", "plugin", "cli"],
   "bin": { "broadcast-plugin": "cli/broadcast-plugin.mjs" },
   "types": "types/index.d.ts",
   "engines": { "node": ">=22" },
+  "files": ["AGENTS.md", "README.md", "LICENSE", "cli/", "examples/", "runtime/", "sandbox/", "spec/", "templates/", "testing/", "types/"],
+  "publishConfig": { "access": "public" },
   "scripts": { "test": "node --test test/*.test.mjs" }
 }

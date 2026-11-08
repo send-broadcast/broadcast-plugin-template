@@ -1,7 +1,0 @@
-{
-  "tasks": {
-    "test": "deno test --no-prompt --allow-net --allow-read --allow-write --allow-run --allow-env test/examples_runtime_test.ts test/runtime_copy_test.ts test/testing_test.ts",
-    "check": "deno check test/types_check.ts test/examples_runtime_test.ts test/runtime_copy_test.ts test/testing_test.ts"
-  },
-  "lock": false
-}

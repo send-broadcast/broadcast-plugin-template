@@ -176,6 +176,26 @@
       ]
     },
     {
+      "name": "the sandbox's data (.sandbox/) is forbidden at any depth",
+      "base": true,
+      "files": {
+        ".sandbox/state.json": "{}",
+        "examples/demo/.SANDBOX/state.json": "{}"
+      },
+      "expected": [
+        {
+          "id": "sandbox-data",
+          "level": "error",
+          "path": ".sandbox/"
+        },
+        {
+          "id": "sandbox-data",
+          "level": "error",
+          "path": "examples/demo/.SANDBOX/"
+        }
+      ]
+    },
+    {
       "name": "a built package is forbidden",
       "base": true,
       "files": {
