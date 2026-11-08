@@ -1,4 +1,5 @@
 dist/
+.sandbox/
 *.broadcast-plugin
 node_modules/
 .env
